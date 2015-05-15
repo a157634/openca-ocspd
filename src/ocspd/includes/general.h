@@ -53,33 +53,97 @@
 #define OCSPD_SRV_OK	0
 #define OCSPD_SRV_ERR	-1
 
+/* OCSP session information (used for statistics) */
+typedef struct ocspd_session_info {
+	struct sockaddr_in  cliaddr;      // client IP (requester)
+	int                 cert_status;  // certificate status (revoked, unknown, ok)
+	int                 resp_status;  // response status (malformedRequest, internalError, tryLater, sigRequired, unauthorized)
+	struct timeval      start;        // timestamp when the request arives
+	struct timeval      stop;         // timestamp when the response was sent
+	unsigned int        duration;     // difference between stop and start
+	char                *issuer;      // issuer of requested certificate
+	char                *ca_id;       // CA config name (caConfig->name)
+	char                *serial;      // certificate serial
+} OCSPD_SESSION_INFO;
+
+/* statistics related definitions */
+#define OCSPD_STATS_INFO_STARTTIME       0x001
+#define OCSPD_STATS_INFO_ENDTIME         0x002
+#define OCSPD_STATS_INFO_RESPONSE_STATUS 0x004
+#define OCSPD_STATS_INFO_CERT_STATUS     0x008
+#define OCSPD_STATS_INFO_SERIAL          0x010
+#define OCSPD_STATS_INFO_ISSUER          0x020
+#define OCSPD_STATS_INFO_CANAME          0x040
+#define OCSPD_STATS_INFO_IP              0x080
+#define OCSPD_STATS_INFO_DURATION        0x100
+#define OCSPD_STATS_RESPONDER_NAME       0x200
+#define OCSPD_STATS_ARRIVAL_TIME         0x400
+#define OCSPD_STATS_DEPARTURE_TIME       0x800
+
+typedef struct {
+	char *name;         // item name
+	char *column;       // column name
+	char *entry;        // selected entry
+	unsigned long flag; // item flag
+} LOG_STATS_ITEM_TBL;
+
+static const LOG_STATS_ITEM_TBL ocsp_stats_item_tbl[] = {
+	{ "StartTime",      "starttime",            NULL, OCSPD_STATS_INFO_STARTTIME},
+	{ "EndTime",        "endtime",              NULL, OCSPD_STATS_INFO_ENDTIME},
+	{ "ResponseStatus", "response_status",      NULL, OCSPD_STATS_INFO_RESPONSE_STATUS},
+	{ "CertStatus",     "cert_status",          NULL, OCSPD_STATS_INFO_CERT_STATUS},
+	{ "Serial",         "serialnumber",         NULL, OCSPD_STATS_INFO_SERIAL},
+	{ "Issuer",         "issuer",               NULL, OCSPD_STATS_INFO_ISSUER},
+	{ "CaName",         "caname",               NULL, OCSPD_STATS_INFO_CANAME},
+	{ "IP",             "ip",                   NULL, OCSPD_STATS_INFO_IP},
+	{ "Duration",       "duration",             NULL, OCSPD_STATS_INFO_DURATION},
+	{ "ResponderName",  "responder_name",       NULL, OCSPD_STATS_RESPONDER_NAME},
+	{ "ArrivalTime",    "arrival_time",         NULL, OCSPD_STATS_ARRIVAL_TIME},
+	{ "DepartureTime",  "departure_time",       NULL, OCSPD_STATS_DEPARTURE_TIME},
+	{ NULL,             NULL,                   NULL, 0},
+};
+
 typedef struct crl_data
 	{
-		/* CRL access method OCSP_CRL_METHOD_... */
-		/* Filename */
-		URL *url;
+		/* Pure CRL data */
+		PKI_X509_CRL *crl;
 
-		X509_CRL *crl;
+		/* Pointer to the list of CRLs entries */
+		STACK_OF(X509_REVOKED) *crl_list;
+
+		/* Number of entries present in the list */
+		//unsigned long entries_num;
+
+		/* X509 nextUpdate and lastUpdate */
+		PKI_TIME *nextUpdate;
+		PKI_TIME *lastUpdate;
+
+		/* Options for auto reloading of CRL upon expiration */
+		int crl_status;
+
+		/* last mtime from loaded CRL */
+		time_t mtime;
+
 	} CRL_DATA;
 
-typedef struct x509_crl_entry 
-	{
-		long reason;
-
-		/* Serial Number of the entry */
-		ASN1_INTEGER *serial;
-
-		/* Revocation Time */
-		ASN1_TIME *rev_time;
-
-		/* Invalidity time, if reason in KeyTime or
-		 * CAKeyTime  */
-		ASN1_GENERALIZEDTIME *invalidity_time;
-
-		/* Hold Instruction, if present */
-		ASN1_OBJECT *hold_instr;
-
-	} X509_CRL_ENTRY;
+//typedef struct x509_crl_entry 
+//	{
+//		long reason;
+//
+//		/* Serial Number of the entry */
+//		ASN1_INTEGER *serial;
+//
+//		/* Revocation Time */
+//		ASN1_TIME *rev_time;
+//
+//		/* Invalidity time, if reason in KeyTime or
+//		 * CAKeyTime  */
+//		ASN1_GENERALIZEDTIME *invalidity_time;
+//
+//		/* Hold Instruction, if present */
+//		ASN1_OBJECT *hold_instr;
+//
+//	} X509_CRL_ENTRY;
 
 typedef struct ca_entry_certid
 	{
@@ -97,17 +161,31 @@ typedef struct ca_entry_certid
 		ASN1_OCTET_STRING *nameHash;
 
 		// Holds the indication for the current status of the CRL
-		int crl_status;
+		//int crl_status;
 
 	} CA_ENTRY_CERTID;
 
 #define sk_CA_ENTRY_CERTID_new_null() SKM_sk_new_null(CA_ENTRY_CERTID)
+#define sk_CA_ENTRY_CERTID_free(st) SKM_sk_free(CA_ENTRY_CERTID, (st))
 #define sk_CA_ENTRY_CERTID_push(st, val) SKM_sk_push(CA_ENTRY_CERTID, (st), (val))
 #define sk_CA_ENTRY_CERTID_pop(st) SKM_sk_pop(CA_ENTRY_CERTID, (st))
 #define sk_CA_ENTRY_CERTID_value(st, i) SKM_sk_value(CA_ENTRY_CERTID, (st), (i))
 #define sk_CA_ENTRY_CERTID_num(st) SKM_sk_num(CA_ENTRY_CERTID, (st))
 #define sk_CA_ENTRY_CERTID_sort(st) SKM_sk_sort(CA_ENTRY_CERTID, (st))
 #define sk_CA_ENTRY_CERTID_find(st) SKM_sk_find(CA_ENTRY_CERTID, (st))
+
+#if OPENSSL_VERSION_NUMBER < 0x10000000L
+DECLARE_STACK_OF(EVP_MD)
+DECLARE_ASN1_SET_OF(EVP_MD)
+#define sk_EVP_MD_new_null() SKM_sk_new_null(EVP_MD)
+#define sk_EVP_MD_free(st) SKM_sk_free(EVP_MD, (st))
+#define sk_EVP_MD_push(st, val) SKM_sk_push(EVP_MD, (st), (val))
+#define sk_EVP_MD_pop(st) SKM_sk_pop(EVP_MD, (st))
+#define sk_EVP_MD_value(st, i) SKM_sk_value(EVP_MD, (st), (i))
+#define sk_EVP_MD_num(st) SKM_sk_num(EVP_MD, (st))
+#define sk_EVP_MD_sort(st) SKM_sk_sort(EVP_MD, (st))
+#define sk_EVP_MD_find(st) SKM_sk_find(EVP_MD, (st))
+#endif
 
 /* List of available CAs */
 typedef struct ca_list_st {
@@ -121,7 +199,7 @@ typedef struct ca_list_st {
 	PKI_X509_CERT *ca_cert;
 
 	/* Cert Identifier */
-	CA_ENTRY_CERTID *cid;
+	STACK_OF(CA_ENTRY_CERTID) *sk_cid;
 
 	/* CA certificate URL */
 	URL *ca_url;
@@ -129,21 +207,11 @@ typedef struct ca_list_st {
 	/* CRL URL */
 	URL *crl_url;
 
-	/* CRL data */
-	PKI_X509_CRL *crl;
+	/* to lock the single CRL of a specific CA */
+	PKI_RWLOCK single_crl_lock;
 
-	/* Pointer to the list of CRLs entries */
-	STACK_OF(X509_REVOKED) *crl_list;
-
-	/* X509 nextUpdate and lastUpdate */
-	PKI_TIME *nextUpdate;
-	PKI_TIME *lastUpdate;
-
-	/* Options for auto reloading of CRL upon expiration */
-	int crl_status;
-
-	/* Number of entries present in the list */
-	unsigned long entries_num;
+	/* CRL data - every access must be locked using single_crl_lock */
+	CRL_DATA  *crl_data;
 
 	/* TOKEN to be used with this CA - if null, the default
          * one will be used */
@@ -153,28 +221,25 @@ typedef struct ca_list_st {
 	char *token_config_dir;
 	PKI_TOKEN *token;
 	
+	int check_issued_by_ca;
+	PKI_DIGEST *ca_cert_digest;
+	char ca_cert_digest_str[EVP_MAX_MD_SIZE+1];
+	URL *db_url;
+	unsigned long issuer_dn_nmflag;
+	char *db_column_ca_fingerprint;
+	char *db_column_issuer_name_hash;
+	char *db_column_serial_number;
+	char *db_column_issuer_dn;
+
 	/* Responder Identifier Type */
 	int response_id_type;
 
 } CA_LIST_ENTRY;
 
 typedef struct {
-	pthread_t thread_tid;
+	PKI_THREAD thread_tid;
 	long thread_count;
 } Thread;
-
-typedef struct {
-	int iget;
-	int iput;
-
-	int connfd;
-	int listenfd;
-	int nthreads;
-
-	int *clifd;
-
-	Thread *threads_list;
-} OPENCA_GENCFG;
 
 typedef struct ocspd_config {
 
@@ -190,6 +255,7 @@ typedef struct ocspd_config {
 	int verbose;
 	int debug;
 	int testmode;
+	int valgrind;
 
 	/* Default Response's validity time */
 	int nmin;
@@ -198,16 +264,18 @@ typedef struct ocspd_config {
 
 	int flags;
 
-	// CRL_DATA crl_data;
-
 	/* User and Group the processes will run as */
 	char *user;
 	char *group;
 	char *chroot_dir;
 
 	/* Digest to be used */
+	STACK_OF(EVP_MD) *issuerHashDigest;
 	PKI_DIGEST_ALG *digest;
 	PKI_DIGEST_ALG *sigDigest;
+
+	/* OCSP responder name - used for logging */
+	char *responder_name;
 
 	/* OCSP responder default token */
 	char *token_name;
@@ -221,17 +289,22 @@ typedef struct ocspd_config {
 	int crl_check_validity;
 	int crl_auto_reload;
 	int crl_reload_expired;
+	int crl_check_mtime;
 
 	int current_crl_reload;
 	int current_crl_check;
 	int alarm_decrement;
 
 	/* DataBase Related */
+	URL *log_stats_url;
+	unsigned long  log_stats_flags; // mask table
 	URL *db_url;
 	int db_persistant;
 
-	/* Network related */
+	/* Request related */
 	ssize_t max_req_size;
+
+	/* Network related */
 	unsigned int max_timeout_secs;
 	char * http_proto;
 	char * base_uri;
@@ -247,12 +320,8 @@ typedef struct ocspd_config {
 	PKI_MUTEX mutexes[3];
 	PKI_COND  condVars[2];
 
-	// PKI_RWLOCK config_lock;
-	PKI_RWLOCK crl_lock;
-
 } OCSPD_CONFIG;
 
-#define CTRL_MUTEX      0
 #define CLIFD_MUTEX     1
 #define SRVFD_MUTEX     2
 

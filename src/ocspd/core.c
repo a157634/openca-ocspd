@@ -10,24 +10,351 @@
 #include "general.h"
 #include "threads.h"
 #include "crl.h"
+ #include <sys/resource.h>
+#include <openssl/err.h>
 
 extern void auto_crl_check( int );
 extern OCSPD_CONFIG *ocspd_conf;
 
-/* Local Functions */
-void handle_sigabrt ( int i );
+/* mutex internally used for the signal handling thread */
+static pthread_mutex_t sig_mutex = PTHREAD_MUTEX_INITIALIZER;
+static PKI_THREAD_ID th_id_main;
+static PKI_THREAD_ID th_id_crl_hdl;
+static PKI_THREAD_ID th_id_con_hdl;
+static PKI_THREAD *th_sig_hdl = NULL;
+static PKI_THREAD *th_con_hdl = NULL;
 
 /* Function Bodies */
+
+static void handle_sigusr1 ( int sig )
+{
+	int ret = PKI_OK;
+	int i;
+	int rv = 0;
+	char err_str[128];
+  
+
+	if(pthread_equal(PKI_THREAD_self(), th_id_main) != 0) // <> 0 means the IDs are equal
+	{
+		PKI_log_debug("Handle SIGUSR1 for main thread");
+
+		// retrieve status from signal handling thread
+		if( (rv = pthread_join(*th_sig_hdl, NULL) ) != 0)
+		{
+			PKI_strerror ( rv, err_str, sizeof(err_str));
+			PKI_log_err("pthread_join() for signal handling thread failed: [%d::%s]", rv, err_str);
+		}
+		else
+			PKI_log_debug("Signal handling thread returned");
+
+		PKI_Free(th_sig_hdl);
+
+		// retrieve status from connection handling thread
+		if( (rv = pthread_join(*th_con_hdl, NULL) ) != 0)
+		{
+			PKI_strerror ( rv, err_str, sizeof(err_str));
+			PKI_log_err("pthread_join() for connection handling thread failed: [%d::%s]", rv, err_str);
+		}
+		else
+			PKI_log_debug("Connection handling thread returned");
+
+		PKI_Free(th_con_hdl);
+
+		for (i = 0; i < ocspd_conf->nthreads; i++)
+		{
+			PKI_log_debug("Retrieve status from worker threads");
+			// retrieve status from worker threads
+			if( (rv = pthread_join(ocspd_conf->threads_list[i].thread_tid, NULL) ) != 0)
+			{
+				PKI_strerror ( rv, err_str, sizeof(err_str));
+				PKI_log_err("pthread_join() for worker thread failed: [%d::%s]", rv, err_str);
+			}
+			else
+				PKI_log(PKI_LOG_INFO, "Worker thread %d returned", i);
+		}
+
+		if(ocspd_conf) OCSPD_free_config(ocspd_conf);
+		if(ocspd_conf) PKI_Free(ocspd_conf);
+		PKI_final_all();
+		PKI_final_thread();  // also needed for the main thread
+
+		PKI_log_debug("Exiting main thread");
+		pthread_exit((void*)&ret);
+		//exit(1); // ugly but needed here
+	}
+  else if(pthread_equal(PKI_THREAD_self(), th_id_con_hdl) != 0) // <> 0 means the IDs are equal
+	{
+		PKI_log_debug("Handle SIGUSR1 for connection handling thread");
+		PKI_final_thread();
+
+		pthread_exit((void*)&ret);
+	}
+  else if(pthread_equal(PKI_THREAD_self(), th_id_crl_hdl) != 0) // <> 0 means the IDs are equal
+	{
+		PKI_log_debug("Handle SIGUSR1 for CRL handling thread");
+		PKI_final_thread();
+
+		pthread_exit((void*)&ret);
+	}
+	else
+	{
+		PKI_log_debug("Handle SIGUSR1 for worker thread");
+		PKI_final_thread();
+
+		pthread_exit((void*)&ret);
+	}
+
+	return;
+}
+
+static void handle_crl_reload ( int sig )
+{
+	switch( sig )
+	{
+		case SIGALRM:
+			PKI_log_debug("Handle SIGALRM for crl thread");
+			if( ocspd_conf->crl_auto_reload ||
+					ocspd_conf->crl_check_validity ) {
+				(void)auto_crl_check(sig);
+			}
+			break;
+
+		case SIGHUP:
+			PKI_log_debug("Handle SIGHUP for crl thread");
+			ocspd_reload_crls( ocspd_conf );
+			break;
+
+		/* whatever you need to do for other signals */
+		default:
+			PKI_log (PKI_LOG_INFO, "handle_crl_reload(): Caught signal [%d] %s (unhandled)", sig, strsignal(sig));
+			break;
+	}
+
+	return;
+}
+
+static void * thread_sig_handler ( void *arg )
+{
+	sigset_t signal_set;
+	int sig;
+	char err_str[512];
+
+	PKI_log_debug ( "thread_sig_handler() started");
+
+	// Register the alarm handler
+	if(set_alrm_handler() != 0)
+		return(NULL);
+
+	for(;;)
+	{
+		/* wait for any and all signals */
+		if(sigfillset(&signal_set) == -1)
+		{
+			PKI_strerror ( errno, err_str, sizeof(err_str));
+			PKI_log_err("sigfillset() failed: [%d] %s", errno, err_str);
+			return(NULL);
+		}
+
+    /* ignore the followin signals */
+		if(sigdelset( &signal_set, SIGUSR1 ) == -1)
+		{
+			PKI_strerror ( errno, err_str, sizeof(err_str));
+			PKI_log_err("sigdelset(SIGUSR1) failed: [%d] %s", errno, err_str);
+			return(NULL);
+		}
+		if(sigdelset( &signal_set, SIGALRM ) == -1)
+		{
+			PKI_strerror ( errno, err_str, sizeof(err_str));
+			PKI_log_err("sigdelset(SIGALRM) failed: [%d] %s", errno, err_str);
+			return(NULL);
+		}
+		if(sigdelset( &signal_set, SIGHUP ) == -1)
+		{
+			PKI_strerror ( errno, err_str, sizeof(err_str));
+			PKI_log_err("sigdelset(SIGHUP) failed: [%d] %s", errno, err_str);
+			return(NULL);
+		}
+		sigwait( &signal_set, &sig );
+
+		/* when we get here, we've caught a signal */
+
+		switch( sig )
+		{
+			case SIGQUIT:
+			case SIGTERM:
+			case SIGINT:
+			{
+				int i;
+				int err;
+
+				pthread_mutex_lock(&sig_mutex);
+				for (i = 0; i < ocspd_conf->nthreads; i++)
+				{
+					PKI_log_debug("Kill worker thread %d \n", i);
+
+					if( (err = pthread_kill(ocspd_conf->threads_list[i].thread_tid, SIGUSR1) ) != 0)
+					{
+						PKI_strerror ( err, err_str, sizeof(err_str));
+						PKI_log_err("pthread_kill() failed: [%d] %s", err, err_str);
+					}
+				}
+
+				PKI_log_debug("Kill connection handling thread\n");
+
+				if( (err = pthread_kill(th_id_con_hdl, SIGUSR1) ) != 0)
+				{
+					PKI_strerror ( err, err_str, sizeof(err_str));
+					PKI_log_err("pthread_kill() failed: [%d] %s", err, err_str);
+				}
+
+				PKI_log_debug("Kill main thread\n");
+
+				if( (err = pthread_kill(th_id_main, SIGUSR1) ) != 0)
+				{
+					PKI_strerror ( err, err_str, sizeof(err_str));
+					PKI_log_err("pthread_kill() failed: [%d] %s", err, err_str);
+				}
+				pthread_mutex_unlock(&sig_mutex);
+				err = 0;
+				PKI_final_thread();
+				pthread_exit((void*)&err);
+				break;
+			}
+			case SIGALRM:
+				pthread_mutex_lock(&sig_mutex);
+				pthread_mutex_unlock(&sig_mutex);
+				if( ocspd_conf->crl_auto_reload ||
+						ocspd_conf->crl_check_validity ) {
+					(void)auto_crl_check(sig);
+				}
+				break;
+
+			case SIGHUP:
+				pthread_mutex_lock(&sig_mutex);
+				ocspd_reload_crls( ocspd_conf );
+				pthread_mutex_unlock(&sig_mutex);
+				break;
+
+			case SIGUSR2:
+				pthread_mutex_lock(&sig_mutex);
+				pthread_mutex_unlock(&sig_mutex);
+				break;
+
+			/* whatever you need to do for
+			 * other signals */
+			default:
+				pthread_mutex_lock(&sig_mutex);
+				PKI_log (PKI_LOG_INFO, "Caught signal [%d] %s (unhandled)", sig, strsignal(sig));
+				pthread_mutex_unlock(&sig_mutex);
+				break;
+		}
+	}
+
+	return(NULL);
+}
+
+static void cleanup_handler(void *arg)
+{
+	PKI_log_debug ( "Mutex cleanup handler called...");
+
+	PKI_MUTEX_release((PKI_MUTEX *)arg);
+}
+
+static void * thread_con_handler ( void *arg )
+{
+	char err_str[512];
+	sigset_t signal_set;
+	int ret = PKI_OK;
+
+
+	th_id_con_hdl = PKI_THREAD_self();
+
+	PKI_log_debug ( "thread_con_handler() started");
+
+	if(sigemptyset(&signal_set) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("sigemptyset() failed: [%d] %s", errno, err_str);
+		goto exit_thread;
+	}
+
+	if(sigaddset(&signal_set, SIGUSR1) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("sigaddset(SIGUSR1) failed: [%d] %s", errno, err_str);
+		goto exit_thread;
+	}
+
+	if(pthread_sigmask( SIG_UNBLOCK, &signal_set, NULL ) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("pthread_sigmask() failed: [%d] %s", errno, err_str);
+		goto exit_thread;
+	}
+
+	pthread_cleanup_push(cleanup_handler, &ocspd_conf->mutexes[CLIFD_MUTEX]);
+
+	for ( ; ; ) 
+	{
+		// Acquires the Mutex for handling the ocspd_conf->connfd
+		PKI_MUTEX_acquire ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
+		PKI_log_debug ( "Wait for a new connection..");
+		if ((ocspd_conf->connfd = PKI_NET_accept(ocspd_conf->listenfd, 0)) == -1)
+		{
+			// Provides some information about the error
+			if (ocspd_conf->verbose || ocspd_conf->debug)
+			{
+				char err_str[512];
+				PKI_strerror ( errno, err_str, sizeof(err_str));
+				PKI_log_err("Network Error [%d::%s]", errno, err_str);
+			}
+
+			// Returns the connfd MUTEX and restart from the top of the cycle
+			PKI_MUTEX_release(&ocspd_conf->mutexes[CLIFD_MUTEX]);
+			continue;
+		}
+		PKI_log_debug ( "Got new connection..");
+
+		// Communicate that there is a good socket waiting for a thread to pickup
+		PKI_COND_broadcast ( &ocspd_conf->condVars[CLIFD_COND] );
+		PKI_MUTEX_release ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
+
+		// Waits for a thread to successfully pickup the socket
+		PKI_log_debug ( "acquire next mutex..");
+		PKI_MUTEX_acquire ( &ocspd_conf->mutexes[SRVFD_MUTEX] );
+		while (ocspd_conf->connfd > 2)
+		{
+			PKI_log_debug ( "cond wait..");
+			PKI_COND_wait ( &ocspd_conf->condVars[SRVFD_COND],
+				&ocspd_conf->mutexes[SRVFD_MUTEX] );
+		}
+		PKI_MUTEX_release ( &ocspd_conf->mutexes[SRVFD_MUTEX] );
+		PKI_log_debug ( "connection handled by a thread");
+
+		if(ocspd_conf->valgrind)
+		{
+			break; // valgrind
+		}
+	}
+
+	pthread_cleanup_pop(0);
+
+exit_thread:
+	PKI_final_thread();
+	pthread_exit((void*)&ret);
+
+	return(NULL);
+}
 
 int start_threaded_server ( OCSPD_CONFIG * ocspd_conf )
 {
 	int i = 0;
 	int rv = 0;
-
-	struct sockaddr_in cliaddr;
-	socklen_t cliaddrlen;
-
+	sigset_t signal_set;
 	struct sigaction sa;
+	char err_str[512];
+
+	th_id_main = PKI_THREAD_self();
 
 	// Just print a nice log message when exits
 	atexit(close_server);
@@ -40,15 +367,16 @@ int start_threaded_server ( OCSPD_CONFIG * ocspd_conf )
 		{
 			PKI_log_err( "Can not load default token (%s/%s)",
 				ocspd_conf->cnf_filename, ocspd_conf->token_name );
-			exit(1);
+			return(1);
 		}
+
 
 		PKI_TOKEN_cred_set_cb ( ocspd_conf->token, NULL, NULL);
 
 		if (PKI_TOKEN_login ( ocspd_conf->token ) != PKI_OK)
 		{
 			PKI_log_debug("Can not login into token!");
-			exit(1);
+			return(1);
 		}
 
 		rv = PKI_TOKEN_check(ocspd_conf->token);
@@ -61,7 +389,7 @@ int start_threaded_server ( OCSPD_CONFIG * ocspd_conf )
 			if (rv & PKI_TOKEN_STATUS_CACERT_ERR) PKI_ERROR(PKI_ERR_TOKEN_CACERT_LOAD, NULL);
 
 			PKI_log_err("Token Configuration Fatal Error (%d)", rv);
-			exit(rv);
+			return(rv);
 		}
 	}
 
@@ -79,7 +407,7 @@ int start_threaded_server ( OCSPD_CONFIG * ocspd_conf )
 		if ((ca->token = PKI_TOKEN_new_null()) == NULL)
 		{
 			PKI_ERROR(PKI_ERR_MEMORY_ALLOC, NULL);
-			exit (1);
+			return (1);
 		}
 
 		PKI_TOKEN_cred_set_cb ( ocspd_conf->token, NULL, NULL);
@@ -90,14 +418,14 @@ int start_threaded_server ( OCSPD_CONFIG * ocspd_conf )
 			PKI_ERROR(rv, NULL);
 			PKI_log_err ( "Can not load token %s for CA %s (%s)",
 				ca->token_name, ca->ca_id, ca->token_config_dir );
-			exit (rv);
+			return (rv);
 		}
 
 		rv = PKI_TOKEN_login(ca->token);
 		if (rv != PKI_OK)
 		{
 			PKI_log_err("Can not login into token (%s)!", ca->ca_id);
-			exit(rv);
+			return(rv);
 		}
 
 		rv = PKI_TOKEN_check(ca->token);
@@ -110,7 +438,7 @@ int start_threaded_server ( OCSPD_CONFIG * ocspd_conf )
 			if (rv & PKI_TOKEN_STATUS_CACERT_ERR) PKI_ERROR(PKI_TOKEN_STATUS_CACERT_ERR, NULL);
 
 			PKI_log_err ( "Token Configuration Fatal Error (%d) for ca %s", rv, ca->ca_id);
-			exit(rv);
+			return(rv);
 		}
 	}
 
@@ -118,14 +446,14 @@ int start_threaded_server ( OCSPD_CONFIG * ocspd_conf )
 					ocspd_conf->bindUrl->port, PKI_NET_SOCK_STREAM )) == PKI_ERR ) {
 		PKI_log_err ("Can not bind to [%s],[%d]",
 			ocspd_conf->bindUrl->addr, ocspd_conf->bindUrl->port);
-		exit(101);
+		return(101);
 	}
 
 	// Now Chroot the application
 	if ((ocspd_conf->chroot_dir) && (set_chroot( ocspd_conf ) < 1))
 	{
 		PKI_log_err ("Can not chroot, exiting!");
-		exit(204);
+		return(204);
 	}
 
 	// Set privileges
@@ -140,93 +468,138 @@ int start_threaded_server ( OCSPD_CONFIG * ocspd_conf )
 		{
 			PKI_log(PKI_LOG_ALWAYS, "SECURITY:: Can not drop privileges! [204]");
 			PKI_log(PKI_LOG_ALWAYS, "SECURITY:: Check User/Group in config file!");
-			exit(204);
+			return(204);
 		}
+	}
+
+	/* We set our needed signal handlers in the main program (aka main thread).
+	 * Later we will create some sub-threads as worker threads, connection handler
+	 * and signal handler. Depending on the thread some signals will then be
+	 * blocked using pthread_sigmask() */
+
+	/* Using SIGUSR1 for a clean termination of the threads */
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = handle_sigusr1;
+	sigemptyset(&sa.sa_mask);
+	
+	if (sigaction(SIGUSR1, &sa, NULL) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("sigaction(SIGUSR1) failed [%d::%s]", errno, err_str);
+		return(1);
+	}
+
+	/* A CRL reload is performed on SIGALRM and SIGHUP */
+	sa.sa_handler = handle_crl_reload;
+
+	if (sigaction(SIGALRM, &sa, NULL) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("sigaction(SIGALRM) failed [%d::%s]", errno, err_str);
+		return(1);
+	}
+
+	if (sigaction(SIGHUP, &sa, NULL) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("sigaction(SIGHUP) failed [%d::%s]", errno, err_str);
+		return(1);
+	}
+
+	/* block all signals in the main thread */
+	if(sigfillset( &signal_set ) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("sigfillset() failed: [%d] %s", errno, err_str);
+		return(1);
+	}
+
+	/* but use SIGUSR1 for thread termination */
+	if(sigdelset( &signal_set, SIGUSR1 ) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("sigdellset() failed: [%d] %s", errno, err_str);
+		return(1);
+	}
+
+	if( (rv = pthread_sigmask( SIG_BLOCK, &signal_set, NULL )) == -1)
+	{
+		PKI_strerror ( rv, err_str, sizeof(err_str));
+		PKI_log_err("pthread_sigmask() failed: [%d] %s", rv, err_str);
+		return(1);
+	}
+
+	/* create the signal handling thread (only ignores SIGALRM, SIGHUP and SIGUSR1) */
+	if ((th_sig_hdl = PKI_THREAD_new(thread_sig_handler, NULL)) == NULL)
+	{
+		PKI_log_err("ERROR::OPENCA_SRV_ERR_THREAD_CREATE");
+		return(-1);
 	}
 
 	if((ocspd_conf->threads_list = calloc ( (size_t) ocspd_conf->nthreads, 
 					sizeof(Thread))) == NULL )
 	{
 		PKI_log_err ("Memory allocation failed");
-		exit(79);
+		return(79);
 	}
 
-	// Creates the Threads
+	/* Create the worker threads */
 	for (i = 0; i < ocspd_conf->nthreads; i++)
 	{
 		if (thread_make(i) != 0)
 		{
 			PKI_log_err ("Can not create thread (%d)\n", i );
-			exit(80);
+			return(80);
 		}
 	}
 
-	// Register the alarm handler
-	set_alrm_handler();
-
-	// Just print a nice log message when killed
-	signal(SIGTERM, handle_sigterm );
-	signal(SIGABRT, handle_sigabrt );
-
-	// Setting the SIGHUP in order to reload the CRLs
-	// sa.sa_handler = auto_crl_check;
-	sa.sa_handler = force_crl_reload;
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_RESTART;
-
-	if (sigaction(SIGHUP, &sa, NULL) == -1)
+	/* create the connection handling thread */
+	if ((th_con_hdl = PKI_THREAD_new(thread_con_handler, NULL)) == NULL)
 	{
-		PKI_log_err("Error during setting sig_handler");
-		exit(1);
+		PKI_log_err("ERROR::OPENCA_SRV_ERR_THREAD_CREATE");
+		return(-1);
 	}
 
-	cliaddrlen = sizeof( cliaddr );
-	for ( ; ; ) 
+	if(sigemptyset(&signal_set) == -1)
 	{
-		// Acquires the Mutex for handling the ocspd_conf->connfd
-		PKI_MUTEX_acquire ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
-		if ((ocspd_conf->connfd = PKI_NET_accept(ocspd_conf->listenfd, 0)) == -1)
-		{
-			// Provides some information about the error
-			if (ocspd_conf->verbose || ocspd_conf->debug)
-			{
-				char err_str[512];
-				PKI_log_err("Network Error [%d::%s]", errno,
-						strerror_r(errno, err_str, sizeof(err_str)));
-			}
-
-			// Returns the connfd MUTEX and restart from the top of the cycle
-			PKI_MUTEX_release(&ocspd_conf->mutexes[CLIFD_MUTEX]);
-			continue;
-		}
-
-		// Some debugging information
-		if (ocspd_conf->debug)
-		{
-			if (getpeername(ocspd_conf->connfd, (struct sockaddr*)&cliaddr, &cliaddrlen) == -1)
-			{
-				char err_str[512];
-				PKI_log_err("Network Error [%d::%s] in getpeername", errno,
-					strerror_r(errno, err_str, sizeof(err_str)));
-			}
-
-			PKI_log(PKI_LOG_INFO, "Connection from [%s]",
-	 			inet_ntoa(cliaddr.sin_addr));
-		}
-
-		// Communicate that there is a good socket waiting for a thread to pickup
-		PKI_COND_broadcast ( &ocspd_conf->condVars[CLIFD_COND] );
-		PKI_MUTEX_release ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
-
-		// Waits for a thread to successfully pickup the socket
-		PKI_MUTEX_acquire ( &ocspd_conf->mutexes[SRVFD_MUTEX] );
-		while (ocspd_conf->connfd > 2)
-		{
-			PKI_COND_wait ( &ocspd_conf->condVars[SRVFD_COND],
-				&ocspd_conf->mutexes[SRVFD_MUTEX] );
-		}
-		PKI_MUTEX_release ( &ocspd_conf->mutexes[SRVFD_MUTEX] );
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("sigemptyset() failed: [%d] %s", errno, err_str);
+		return(-1);
 	}
+
+	if(sigaddset(&signal_set, SIGUSR1) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("sigaddset(SIGUSR1) failed: [%d] %s", errno, err_str);
+		return(-1);
+	}
+
+	if(sigaddset(&signal_set, SIGHUP) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("sigaddset(SIGHUP) failed: [%d] %s", errno, err_str);
+		return(-1);
+	}
+
+	if(sigaddset(&signal_set, SIGALRM) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("sigaddset(SIGALRM) failed: [%d] %s", errno, err_str);
+		return(-1);
+	}
+
+	if(pthread_sigmask( SIG_UNBLOCK, &signal_set, NULL ) == -1)
+	{
+		PKI_strerror ( errno, err_str, sizeof(err_str));
+		PKI_log_err("pthread_sigmask() failed: [%d] %s", errno, err_str);
+		return(-1);
+	}
+
+	while(1)
+	{
+		pause();
+	}
+
 
 	return(0);
 }
@@ -235,7 +608,6 @@ int set_alrm_handler( void ) {
 
 	/* Now on the parent process we setup the auto_checking
 	   functions */
-	struct sigaction sa;
 
 	if( ocspd_conf->crl_auto_reload ||
 			ocspd_conf->crl_check_validity ) {
@@ -253,46 +625,10 @@ int set_alrm_handler( void ) {
 				(val_check ? val_check : auto_rel) : 
 					(auto_rel ? auto_rel : val_check ));
 
-		sa.sa_handler = auto_crl_check;
-		sigemptyset(&sa.sa_mask);
-		sa.sa_flags = SA_RESTART;
-
-		if (sigaction(SIGALRM, &sa, NULL) == -1) {
-			PKI_log_err("Error handling the death processes");
-			exit(1);
-		}
-
-	 	/* signal( SIGALRM, auto_crl_check ); */
-	 	alarm ( (unsigned int) ocspd_conf->alarm_decrement );
-	} else {
-		signal( SIGALRM, SIG_IGN);
+		alarm ( (unsigned int) ocspd_conf->alarm_decrement );
 	}
 
-	return 1;
-}
-
-void handle_sighup ( int i ) {
-
-	PKI_log( PKI_LOG_WARNING, "SIGHUP::Reloading CRLs, Master!");
-	ocspd_reload_crls( ocspd_conf );
-	return;
-}
-
-void handle_sigterm ( int i ) {
-	if( ocspd_conf->verbose ) {
-		PKI_log (PKI_LOG_INFO,"SIGTERM::Received TERM signal");
-	}
-	exit(0);
-	return;
-}
-
-void handle_sigabrt ( int i ) {
-
-	PKI_log_err("SIGABRT::received - should not happen,");
-	PKI_log_err("SIGABRT::please enable strict locking.");
-	PKI_log_err("ERROR::SIGABRT::Fatal Error, aborting server!");
-
-	return;
+	return 0;
 }
 
 void close_server ( void ) {
@@ -356,3 +692,4 @@ int set_chroot( OCSPD_CONFIG *conf ) {
 	/* Ok, chdir and chroot! */
 	return(1);
 }
+

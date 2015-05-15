@@ -20,7 +20,13 @@
 
 #include "general.h"
 
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L
+#include <openssl/ts.h>
+#endif
+
 OCSPD_CONFIG * OCSPD_load_config( char *configfile );
+
+void OCSPD_free_config(OCSPD_CONFIG *cnf);
 
 int OCSPD_build_ca_list ( OCSPD_CONFIG *handler,
 				PKI_CONFIG_STACK *ca_conf_sk);
@@ -31,8 +37,7 @@ int ocspd_reload_all_ca ( OCSPD_CONFIG *conf );
 
 int ocspd_load_ca_section ( OCSPD_CONFIG *conf, char *dbms_section );
 
-STACK_OF(X509_REVOKED) *ocspd_build_crl_entries_list ( CA_LIST_ENTRY *ca,
-				PKI_X509_CRL *crl );
+STACK_OF(X509_REVOKED) *ocspd_build_crl_entries_list ( PKI_X509_CRL *crl, char *ca_id );
 
 CA_LIST_ENTRY * CA_LIST_ENTRY_new ( void );
 
@@ -41,9 +46,12 @@ void CA_LIST_ENTRY_free ( CA_LIST_ENTRY *ca );
 CA_LIST_ENTRY * OCSPD_ca_entry_new ( OCSPD_CONFIG *handler,
 				PKI_X509_CERT *x, PKI_CONFIG *cnf );
 
-CA_ENTRY_CERTID * CA_ENTRY_CERTID_new ( PKI_X509_CERT *x, 
-				PKI_DIGEST_ALG * digest );
+STACK_OF(CA_ENTRY_CERTID) * CA_ENTRY_CERTID_new_sk ( PKI_X509_CERT *cert, 
+					STACK_OF(EVP_MD) *mds );
 
 void CA_ENTRY_CERTID_free ( CA_ENTRY_CERTID *cid );
+
+void CRL_DATA_free ( CRL_DATA *crl_data );
+void CRL_DATA_free_all ( CRL_DATA *crl_data );
 
 #endif

@@ -17,6 +17,8 @@
 #define  MAX_USEC		1000
 #define  WAIT_USEC		50
 
+#define MAX_LOG_TRACE_SIZE	256
+
 extern OCSPD_CONFIG *ocspd_conf;
 
 PKI_X509_OCSP_REQ * ocspd_req_get_socket ( int connfd, OCSPD_CONFIG *ocspd_conf) 
@@ -33,11 +35,14 @@ PKI_X509_OCSP_REQ * ocspd_req_get_socket ( int connfd, OCSPD_CONFIG *ocspd_conf)
 	maxsize = (size_t) ocspd_conf->max_req_size;
 
 	PKI_HTTP *http_msg = NULL;
+	char *p_data = NULL;
+	int  len = 0;
+
 
 	if ( connfd <= 0 ) return NULL;
 
 	// Initialize the sock structure
-	sock.ssl = NULL;
+	memset(&sock, 0, sizeof(sock));
 	PKI_SOCKET_set_fd ( &sock, connfd );
 
 	http_msg = PKI_HTTP_get_message(&sock, (int) ocspd_conf->max_timeout_secs, maxsize);
@@ -61,21 +66,29 @@ PKI_X509_OCSP_REQ * ocspd_req_get_socket ( int connfd, OCSPD_CONFIG *ocspd_conf)
 		}
 		
 		req_pnt = http_msg->path;
-		while(strchr(req_pnt, '/') != NULL)
-		{
-			req_pnt = strchr(req_pnt, '/') + 1;
-		}
+		if(strncmp_nocase(req_pnt, "http://", 7) == 0)
+			req_pnt += 7;
+		else if(strncmp_nocase(req_pnt, "https://", 8) == 0)
+			req_pnt += 8;
+
+		/* Skip leading '/' for the path */
+		while( *req_pnt == '/' )
+			req_pnt++;
 
 		pathmem = PKI_MEM_new_data(strlen(req_pnt), (unsigned char *) req_pnt);
 		if (pathmem == NULL)
 		{
-			PKI_log_err("Memory Allocation Error!");
+			PKI_log_err("Memory allocation failed for %d bytes!", strlen(req_pnt));
+			if(strlen(req_pnt) > MAX_LOG_TRACE_SIZE)
+				PKI_log_hexdump(PKI_LOG_ERR, "PKI_MEM_new_data()", MAX_LOG_TRACE_SIZE, req_pnt);
+			else
+				PKI_log_hexdump(PKI_LOG_ERR, "PKI_MEM_new_data()", (int) strlen(req_pnt), req_pnt);
 			goto err;
 		}
 
 		if (PKI_MEM_decode(pathmem, PKI_DATA_FORMAT_URL, 0) != PKI_OK)
 		{
-			PKI_log_err("Memory Allocation Error!");
+			PKI_log_err("URL decode failed!");
 			PKI_MEM_free(pathmem);
 			goto err;
 		}
@@ -83,6 +96,12 @@ PKI_X509_OCSP_REQ * ocspd_req_get_socket ( int connfd, OCSPD_CONFIG *ocspd_conf)
 		if (PKI_MEM_decode(pathmem, PKI_DATA_FORMAT_B64, 0) != PKI_OK)
 		{
 			PKI_log_err ("Error decoding B64 Mem");
+
+			if(pathmem->size > MAX_LOG_TRACE_SIZE)
+				PKI_log_hexdump(PKI_LOG_ERR, "PKI_MEM_B64_decode1()", MAX_LOG_TRACE_SIZE, pathmem->data);
+			else
+				PKI_log_hexdump(PKI_LOG_ERR, "PKI_MEM_B64_decode1()", (int) pathmem->size, pathmem->data);
+
 			PKI_MEM_free (pathmem);
 			goto err;
 		}
@@ -96,13 +115,23 @@ PKI_X509_OCSP_REQ * ocspd_req_get_socket ( int connfd, OCSPD_CONFIG *ocspd_conf)
 		}
 
 		// Transfer data ownership and release the pathmem
-		pathmem->data = NULL;
-		pathmem->size = 0;
+		// BIO_new_mem_buf() creates a new memory buffer - therefore this is not needed
+		//pathmem->data = NULL;
+		//pathmem->size = 0;
+
+		if( (len = (int)BIO_get_mem_data(mem, &p_data) ) <= 0)
+			PKI_log_debug ( "BIO_get_mem_data(GET) failed");
 
 		// Tries to decode the binary (der) encoded request
 		if ((req_val = d2i_OCSP_REQ_bio(mem, NULL)) == NULL)
 		{
 			PKI_log_err("Can not parse REQ");
+
+			if(len > MAX_LOG_TRACE_SIZE)
+				PKI_log_hexdump(PKI_LOG_ERR, "d2i_OCSP_REQ_bio(GET)", MAX_LOG_TRACE_SIZE, p_data);
+			else
+				PKI_log_hexdump(PKI_LOG_ERR, "d2i_OCSP_REQ_bio(GET)", len, p_data);
+
 			BIO_free(mem);
 			PKI_MEM_free(pathmem);
 			goto err;
@@ -123,9 +152,17 @@ PKI_X509_OCSP_REQ * ocspd_req_get_socket ( int connfd, OCSPD_CONFIG *ocspd_conf)
 		}
 		else
 		{
+			if( (len = (int)BIO_get_mem_data(mem, &p_data) ) <= 0)
+				PKI_log_debug ( "BIO_get_mem_data(POST) failed");
+
 			if ((req_val = d2i_OCSP_REQ_bio(mem, NULL)) == NULL)
 			{
 				PKI_log_err("Can not parse REQ");
+
+				if(len > MAX_LOG_TRACE_SIZE)
+					PKI_log_hexdump(PKI_LOG_ERR, "d2i_OCSP_REQ_bio(POST)", MAX_LOG_TRACE_SIZE, p_data);
+				else
+					PKI_log_hexdump(PKI_LOG_ERR, "d2i_OCSP_REQ_bio(POST)", len, p_data);
 			}
 			BIO_free (mem);
 		}

@@ -15,15 +15,15 @@ install-data-local:
 	@$(NORMAL_INSTALL)
 	$(mkinstalldirs) $(etc_prefix); \
 	$(mkinstalldirs) $(etc_prefix)/init.d; \
-	$(mkinstalldirs) $(etc_prefix)/ocspd; \
-	$(mkinstalldirs) $(etc_prefix)/ocspd/certs; \
-	$(mkinstalldirs) $(etc_prefix)/ocspd/crls; \
-	$(mkinstalldirs) $(etc_prefix)/ocspd/private; \
-	$(mkinstalldirs) $(etc_prefix)/ocspd/ca.d \
-	$(mkinstalldirs) $(etc_prefix)/ocspd/pki; \
-	$(mkinstalldirs) $(etc_prefix)/ocspd/pki/token.d; \
-	$(mkinstalldirs) $(etc_prefix)/ocspd/pki/hsm.d; \
-	$(mkinstalldirs) $(etc_prefix)/ocspd/pki/profile.d
+	$(mkinstalldirs) -m 755 $(etc_prefix)/ocspd; \
+	$(mkinstalldirs) -m 755 $(etc_prefix)/ocspd/certs; \
+	$(mkinstalldirs) -m 755 $(etc_prefix)/ocspd/crls; \
+	$(mkinstalldirs) -m 700 $(etc_prefix)/ocspd/private; \
+	$(mkinstalldirs) -m 755 $(etc_prefix)/ocspd/ca.d \
+	$(mkinstalldirs) -m 755 $(etc_prefix)/ocspd/pki; \
+	$(mkinstalldirs) -m 755 $(etc_prefix)/ocspd/pki/token.d; \
+	$(mkinstalldirs) -m 755 $(etc_prefix)/ocspd/pki/hsm.d; \
+	$(mkinstalldirs) -m 755 $(etc_prefix)/ocspd/pki/profile.d
 	@for file in *.xml ; do \
 	    if test -f $$file; then \
 	      $(INSTALL_DATA) $$file $(etc_prefix)/ocspd; \

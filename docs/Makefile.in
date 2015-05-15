@@ -564,17 +564,15 @@ man::		$(POD_MANS)
 	$(POD2HTML) $< >$@
 
 install-man::
-	@$(mkinstalldirs) $(DESTDIR)$(exec_prefix)
-	@$(mkinstalldirs) $(DESTDIR)$(exec_prefix)/share
-	@$(mkinstalldirs) $(DESTDIR)$(exec_prefix)/share/man
-	@$(mkinstalldirs) $(DESTDIR)$(exec_prefix)/share/man/man$(MANLEV)
-	@echo "Installing Man pages is $(DESTDIR)$(exec_prefix)/share/man/man$(MANLEV) ... "
+	@$(mkinstalldirs) $(DESTDIR)$(mandir)
+	@$(mkinstalldirs) $(DESTDIR)$(mandir)/man$(MANLEV)
+	@echo "Installing Man pages is $(DESTDIR)$(mandir)/man$(MANLEV) ... "
 	@for file in $(man_MANS) ; do \
        if test -f $$file ; then \
-        $(INSTALL_DATA) $$file $(DESTDIR)$(exec_prefix)/share/man/man$(MANLEV) ; \
+        $(INSTALL_DATA) $$file $(DESTDIR)$(mandir)/man$(MANLEV) ; \
        fi ; \
     done
-	@echo "Done. Add $(DESTDIR)$(exec_prefix)/share/man to MANPATH."
+	@echo "Done. Add $(DESTDIR)$(mandir) to MANPATH."
 
 # install-data-am: install-man
 # 	@$(NORMAL_INSTALL) ; \

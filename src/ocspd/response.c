@@ -7,6 +7,9 @@
  */
  
 #include "general.h"
+#include <libpki/net/pki_mysql.h>
+#include <openssl/md5.h>
+#include <openssl/ripemd.h>
 
 pthread_mutex_t sign_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -26,6 +29,266 @@ static const char *statusInfo[] = {
 		"certificate revoked",
 		NULL
 };
+
+static CA_LIST_ENTRY *OCSPD_CA_ENTRY_find(OCSPD_CONFIG *conf, OCSP_CERTID *cid, int *resp_status);
+
+static int PKI_RET_SQL_ERR = 2;
+
+static void print_name(BIO *out, const char *title, X509_NAME *nm, unsigned long lflags)
+{
+  char *buf;
+  char mline = 0;
+  int indent = 0;
+
+  if(title) BIO_puts(out, title);
+  if((lflags & XN_FLAG_SEP_MASK) == XN_FLAG_SEP_MULTILINE) {
+    mline = 1;
+    indent = 4;
+  }
+  if(lflags == XN_FLAG_COMPAT) {
+    buf = X509_NAME_oneline(nm, 0, 0);
+    BIO_puts(out, buf);
+    OPENSSL_free(buf);
+  } else {
+    if(mline) BIO_puts(out, "\n");
+    X509_NAME_print_ex(out, nm, indent, lflags);
+  }
+}
+
+static int create_sql_query(OCSPD_CONFIG  *conf, OCSP_CERTID *cid, CA_LIST_ENTRY *ca, char **url)
+{
+	int	ret = PKI_ERR;
+	char	*p_data = NULL;
+	BIO	*membio = NULL;
+	long	len = 0;
+
+
+	PKI_log_debug ( "URL path : %s", ca->db_url->path);
+	PKI_log_debug ( "URL attrs: %s", ca->db_url->attrs);
+	PKI_log_debug ( "URL usr  : %s", ca->db_url->usr);
+	PKI_log_debug ( "URL pwd  : %s", ca->db_url->pwd);
+	PKI_log_debug ( "URL addr : %s", ca->db_url->addr);
+	PKI_log_debug ( "URL orig : %s", ca->db_url->url_s);
+ 
+	if( (membio = BIO_new(BIO_s_mem())) == NULL)
+	{
+	  goto end;
+	}
+
+	if(BIO_printf(membio, "mysql://") <= 0)
+	{
+		PKI_log_err ("BIO_printf() failed!\n");
+		goto end;
+	}
+
+	if(ca->db_url->usr && ca->db_url->pwd)
+	{
+		if(BIO_printf(membio, "%s:%s@", ca->db_url->usr, ca->db_url->pwd) <= 0)
+		{
+			PKI_log_err ("BIO_printf() failed!\n");
+			goto end;
+		}
+	}
+
+	if(BIO_printf(membio, "%s/%s/", ca->db_url->addr, ca->db_url->path) <= 0)
+	{
+		PKI_log_err ("BIO_printf() failed!\n");
+		goto end;
+	}
+
+	/* dbColumnNameCaFingerprint */
+	if(ca->db_column_ca_fingerprint)
+	{
+		if(BIO_printf(membio, "(%s=%s)",
+				ca->db_column_ca_fingerprint,
+				ca->ca_cert_digest_str) <= 0)
+		{
+			PKI_log_err ("BIO_printf() failed!\n");
+			goto end;
+		}
+	}
+
+	/* dbColumnNameSerialNumber */
+	if(ca->db_column_serial_number)
+	{
+		int  err = 0;
+		char *p_serial = NULL;
+
+		/* convert Serial to a decimal (!) string value */
+		if( (p_serial = PKI_INTEGER_get_parsed(cid->serialNumber) ) == NULL)
+		{
+			PKI_log_err ("i2s_ASN1_INTEGER() failed!\n");
+			goto end;
+		}
+
+		err = BIO_printf(membio, "(%s=%s)", ca->db_column_serial_number, p_serial);
+
+		PKI_Free ( p_serial );
+
+		if( err <= 0)
+		{
+			PKI_log_err ("BIO_printf() failed!\n");
+			goto end;
+		}
+	}
+
+	/* dbColumnNameIssuerNameHash */
+	if(ca->db_column_issuer_name_hash)
+	{
+		if(BIO_printf(membio, "(%s=", ca->db_column_issuer_name_hash) <= 0)
+		{
+			PKI_log_err ("BIO_printf() failed!\n");
+			goto end;
+		}
+
+		if(i2a_ASN1_STRING(membio, cid->issuerNameHash, V_ASN1_OCTET_STRING) <= 0)
+		{
+			PKI_log_err ("i2a_ASN1_STRING() failed!\n");
+			goto end;
+		}
+
+		if(BIO_printf(membio, ")") <= 0)
+		{
+			PKI_log_err ("BIO_printf() failed!\n");
+			goto end;
+		}
+	}
+
+	/* dbColumnNameIssuerDN */
+	if(ca->db_column_issuer_dn)
+	{
+		X509_NAME *name = NULL;
+
+		if(BIO_printf(membio, "(%s=", ca->db_column_issuer_dn) <= 0)
+		{
+			PKI_log_err ("BIO_printf() failed!\n");
+			goto end;
+		}
+
+		name = (X509_NAME *)PKI_X509_CERT_get_data(ca->ca_cert, PKI_X509_DATA_SUBJECT);
+		if(!name)
+		{
+			PKI_log_err ("No subject name available for given certificate!\n");
+			goto end;
+		}
+
+		(void)print_name(membio, NULL, name, ca->issuer_dn_nmflag);
+
+		if(BIO_printf(membio, ")") <= 0)
+		{
+			PKI_log_err ("BIO_printf() failed!\n");
+			goto end;
+		}
+	}
+
+	if(ca->db_url->attrs)
+	{
+		if(BIO_printf(membio, "?%s", ca->db_url->attrs) <= 0)
+		{
+			PKI_log_err ("BIO_printf() failed!\n");
+			goto end;
+		}
+	}
+
+	if(BIO_write(membio, "\x0", 1) <= 0)
+	{
+		PKI_log_err ("BIO_write() failed!\n");
+		goto end;
+	}
+
+	if( (len = BIO_get_mem_data(membio, &p_data) ) <= 0)
+	{
+		PKI_log_debug ( "BIO_get_mem_data() failed");
+		goto end;
+	}
+
+	PKI_log_debug ( "%s", p_data);
+
+	if( (*url = PKI_Malloc((size_t) len) ) == NULL)
+	{
+		PKI_log_err ("allocating %d bytes failed\n", len);
+		goto end;
+	}
+
+	memcpy(*url, p_data, (size_t) len);
+
+	ret = PKI_OK;
+
+end:
+	if(membio) BIO_free(membio);
+
+	return(ret);
+}
+
+static int perform_sql_query(OCSPD_CONFIG  *conf, OCSP_CERTID *cid, char *p_url)
+{
+	int ret = PKI_ERR;
+	PKI_MEM_STACK *mem_st = NULL;
+
+	/* NULL is also returned when no rows where found - but also if an DB error (e.g. wrong query) occured */
+	if( (mem_st = (PKI_MEM_STACK *)URL_get_data_mysql(p_url, 0) ) == NULL)
+	{
+		ret = PKI_RET_SQL_ERR;
+		goto end;
+	}
+
+	if(PKI_STACK_MEM_elements(mem_st) > 1)
+	{
+		ASN1_INTEGER *serial = NULL;
+		char *s = NULL;
+
+		OCSP_id_get0_info(NULL, NULL, NULL, &serial, cid);
+		if( (s = PKI_INTEGER_get_parsed ( serial ) ) != NULL)
+		{
+			PKI_log_err("Found more than one certificate with serial %s, check database!\n", s);
+			PKI_Free ( s );
+		}
+		else
+		{
+			PKI_log_err("Found more than one certificate for requested serial, check database!\n");
+		}
+
+		goto end;
+	}
+
+	/* Example if we want to retrieve the returned status */
+	/*
+	for (i = 0; i < PKI_STACK_MEM_elements( mem_st ); i++)
+	{
+		PKI_MEM       *mem    = NULL;
+		unsigned char *data   = NULL;
+		size_t        l_data  = 0;
+
+		if( (mem = PKI_STACK_MEM_get_num( mem_st, i ) ) == NULL)
+		{
+			if( conf->debug ) PKI_log_debug ( "URL_get_data_mysql():PKI_STACK_MEM_get_num(): no data returned");
+			goto end;
+		}
+
+		if( (data = PKI_MEM_get_data(mem) ) == NULL)
+		{
+			if( conf->debug ) PKI_log_debug ( "URL_get_data_mysql():PKI_STACK_MEM_get_data(): no data returned");
+			goto end;
+		}
+
+		if( (l_data = PKI_MEM_get_size(mem) ) == 0)
+		{
+			if( conf->debug ) PKI_log_debug ( "URL_get_data_mysql():PKI_STACK_MEM_get_size(): no length returned");
+			goto end;
+		}
+
+		if( conf->debug ) PKI_log_debug ( "Length: %d\n", l_data);
+		printf("DATA: %s\n", data);
+	}
+	*/
+
+	ret = PKI_OK;
+
+end:
+	PKI_STACK_MEM_free_all(mem_st);
+
+	return(ret);
+}
 
 int sign_ocsp_response(PKI_X509_OCSP_RESP *resp, OCSPD_CONFIG *conf, PKI_X509_CERT *signCert, 
 		       PKI_X509_CERT *caCert, PKI_TOKEN *tk, PKI_X509_OCSP_RESPID_TYPE resp_id_type)
@@ -72,7 +335,7 @@ int sign_ocsp_response(PKI_X509_OCSP_RESP *resp, OCSPD_CONFIG *conf, PKI_X509_CE
 		PKI_log(PKI_LOG_WARNING, "No CA certificate for OCSP response signing");
 
 	// It seems that CISCO devices require the SHA1 algorithm to be
- 	// used. Make sure you use that in the configuration for the digest
+	// used. Make sure you use that in the configuration for the digest
 	if (conf->sigDigest)
 		sign_dgst = conf->sigDigest;
 	else
@@ -122,8 +385,8 @@ int sign_ocsp_response(PKI_X509_OCSP_RESP *resp, OCSPD_CONFIG *conf, PKI_X509_CE
 		PKI_log_debug ("Response signed successfully");
 
 	// Test Mode: Issues WRONG signatures by flipping the first
- 	// bit in the signature. Use it ONLY for testing OCSP clients
- 	// verify capabilities!
+	// bit in the signature. Use it ONLY for testing OCSP clients
+	// verify capabilities!
 	if (conf->testmode)
 	{
 		PKI_STRING *signature = NULL;
@@ -136,7 +399,7 @@ int sign_ocsp_response(PKI_X509_OCSP_RESP *resp, OCSPD_CONFIG *conf, PKI_X509_CE
 		if (signature)
 		{
 			PKI_X509_OCSP_RESP_VALUE *resp_val = NULL;
-  			PKI_OCSP_RESP *r = NULL;
+			PKI_OCSP_RESP *r = NULL;
 			OCSP_BASICRESP *bsrp = NULL;
 
 			int i = 0;
@@ -145,15 +408,15 @@ int sign_ocsp_response(PKI_X509_OCSP_RESP *resp, OCSPD_CONFIG *conf, PKI_X509_CE
 			for (i=0; i < 1; i++ )
 			{
 				if(ASN1_BIT_STRING_get_bit(signature, i))
-    				ASN1_BIT_STRING_set_bit(signature, i, 0);
-    			else
-    				ASN1_BIT_STRING_set_bit(signature, i, 1);
+					ASN1_BIT_STRING_set_bit(signature, i, 0);
+				else
+					ASN1_BIT_STRING_set_bit(signature, i, 1);
 			}
 
 			r = resp->value;
 
 			// Now we need to re-encode the basicresp
-		  	resp_val = r->resp;
+			resp_val = r->resp;
 			bsrp = r->bs;
 
 			if (resp_val->responseBytes)
@@ -162,7 +425,7 @@ int sign_ocsp_response(PKI_X509_OCSP_RESP *resp, OCSPD_CONFIG *conf, PKI_X509_CE
 			if (!(resp_val->responseBytes = OCSP_RESPBYTES_new()))
 			{
 				PKI_log_err("Memory Error, aborting signature mangling!");
- 				return PKI_ERR;
+				return PKI_ERR;
 			}
 
 			// Sets the OCSP basic bit
@@ -202,7 +465,8 @@ PKI_X509_OCSP_RESP *make_error_response(PKI_X509_OCSP_RESP_STATUS status)
 	return resp;
 }
 
-PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *conf )
+PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *conf ,
+						OCSPD_SESSION_INFO *sinfo)
 {
 	OCSP_CERTID *cid = NULL;
 
@@ -215,12 +479,10 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 
 	PKI_X509_CERT *signCert = NULL;
 	PKI_X509_CERT *caCert = NULL;
+	X509_EXTENSION *extension = NULL;
 
-	int i, id_count;
+	int i, j, id_count;
 	int signResponse;
-
-	int use_server_cert = 0;
-	int use_server_cacert = 0;
 
 	PKI_TIME *thisupd = NULL;
 	PKI_TIME *nextupd = NULL;
@@ -239,6 +501,18 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 
 		// Let's go to the end
 		goto end;
+	}
+
+	// check for critical extension in OCSP_REQUEST
+	for (j = 0; j < sk_X509_EXTENSION_num(req_val->tbsRequest->requestExtensions); j++)
+	{
+		extension = sk_X509_EXTENSION_value(req_val->tbsRequest->requestExtensions, j);
+		if(X509_EXTENSION_get_critical(extension))
+		{
+			PKI_log_err ( "Critical extenstion found in OCSP requestExtensions\n");
+			resp = make_error_response(PKI_X509_OCSP_RESP_STATUS_MALFORMEDREQUEST);
+			goto end;
+		}
 	}
 
 	// Let's get the number of requests in the OCSP req
@@ -280,6 +554,30 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 		PKI_INTEGER   *serial = NULL;
 		CA_LIST_ENTRY *ca     = NULL;
 		X509_REVOKED  *entry  = NULL;
+		OCSP_ONEREQ   *one    = NULL;
+		int crl_status = 0;
+    int resp_status = 0;
+
+		if( (one = OCSP_request_onereq_get0(req_val, i) ) == NULL)
+		{
+			PKI_log_err ( "Extracting one request from input OCSP request\n");
+			if (resp) PKI_X509_OCSP_RESP_free(resp);
+			resp = make_error_response(PKI_X509_OCSP_RESP_STATUS_MALFORMEDREQUEST);
+			goto end;
+		}
+
+		// check for critical extension in OCSP_ONEREQ
+		for (j = 0; j < sk_X509_EXTENSION_num(one->singleRequestExtensions); j++)
+		{
+			extension = sk_X509_EXTENSION_value(one->singleRequestExtensions, j);
+			if(X509_EXTENSION_get_critical(extension))
+			{
+				PKI_log_err ( "Critical extenstion found in OCSP singleRequestExtensions\n" );
+				if (resp) PKI_X509_OCSP_RESP_free (resp);
+				resp = make_error_response(PKI_X509_OCSP_RESP_STATUS_MALFORMEDREQUEST);
+				goto end;
+			}
+		}
 
 		/* Get basic request info */
 		if (((cid = PKI_X509_OCSP_REQ_get_cid(req, i)) == NULL) ||
@@ -292,32 +590,109 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 			goto end;
 		}
 
+		if(serial->length <= 0)
+		{
+			PKI_log_err ( "Invalid length of serial number in request: %d\n", serial->length);
+			if (resp) PKI_X509_OCSP_RESP_free (resp);
+			resp = make_error_response(PKI_X509_OCSP_RESP_STATUS_MALFORMEDREQUEST);
+			goto end;
+		}
+
+		if (parsedSerial) PKI_Free(parsedSerial);
+		parsedSerial = PKI_INTEGER_get_parsed(serial);
+
+		// TODO: Check for several request handled in one loop
+		if( (sinfo->serial = BUF_strdup(parsedSerial)) == NULL)
+		{
+			PKI_ERROR(PKI_ERR_MEMORY_ALLOC, NULL);
+			if (resp) PKI_X509_OCSP_RESP_free(resp);
+			resp = make_error_response(PKI_X509_OCSP_RESP_STATUS_INTERNALERROR);
+			goto end;
+		}
+
 		// Some debugging information
 		if (conf->verbose || conf->debug)
 		{
-			if (parsedSerial) PKI_Free(parsedSerial);
-			parsedSerial = PKI_INTEGER_get_parsed(serial);
-
-			if (conf->debug)
-				PKI_log( PKI_LOG_INFO, "Request for certificate serial %s", parsedSerial);
+			PKI_log( PKI_LOG_INFO, "Request for certificate serial %s", parsedSerial);
 		}
 
 		/* Is this request about our CA? */
-		if ((ca = OCSPD_CA_ENTRY_find(conf, cid)) == NULL)
+		if ((ca = OCSPD_CA_ENTRY_find(conf, cid, &resp_status)) == NULL)
 		{
 			if (conf->verbose)
 				PKI_log(PKI_LOG_INFO, "%s [serial %s]",
 					statusInfo[OCSPD_INFO_NON_RECOGNIZED_CA], parsedSerial);
 
-			// Adds the single response to the response container
-			PKI_X509_OCSP_RESP_add(resp, cid, PKI_OCSP_CERTSTATUS_UNKNOWN,
-					NULL, NULL, nextupd, 0, NULL);
-
-			// TODO: Maybe we could add the serviceLocator extension
- 			//       we can use the PRQP to find out the server address
-
-			continue;
+			if(resp_status)
+			{
+				// if 'resp_status' was set in OCSPD_CA_ENTRY_find() we return an error response
+				if (resp) PKI_X509_OCSP_RESP_free (resp);
+				resp = make_error_response(resp_status);
+				goto end;
+			}
+			else
+			{
+				sinfo->cert_status = V_OCSP_CERTSTATUS_UNKNOWN;
+      
+				PKI_log_debug( "After OCSPD_CA_ENTRY_find(): create resp");
+				// Adds the single response to the response container
+				PKI_X509_OCSP_RESP_add(resp, cid, PKI_OCSP_CERTSTATUS_UNKNOWN,
+						NULL, NULL, nextupd, 0, NULL);
+      
+				// TODO: Maybe we could add the serviceLocator extension
+				//       we can use the PRQP to find out the server address
+      
+				continue;
+			}
 		}
+
+		PKI_RWLOCK_read_lock ( &ca->single_crl_lock );
+		crl_status = ca->crl_data->crl_status;
+
+
+		if(ca->crl_data->crl)
+		{
+			BIO *bio = NULL;
+			unsigned long flags = ASN1_STRFLGS_ESC_2253 | ASN1_STRFLGS_UTF8_CONVERT | XN_FLAG_SEP_COMMA_PLUS | XN_FLAG_DN_REV | XN_FLAG_FN_SN;
+			char *buf = NULL;
+			size_t len = 0;
+
+
+			if( (bio = BIO_new(BIO_s_mem())) == NULL)
+			{
+				PKI_RWLOCK_release_read ( &ca->single_crl_lock );
+				PKI_log_err ("BIO_new() Memory Allocation error");
+				if (resp) PKI_X509_OCSP_RESP_free (resp);
+				resp = make_error_response(PKI_X509_OCSP_RESP_STATUS_INTERNALERROR);
+				goto end;
+			}
+
+			X509_NAME_print_ex(bio, PKI_X509_CRL_get_data(ca->crl_data->crl, PKI_X509_DATA_ISSUER), 0, flags);
+			PKI_RWLOCK_release_read ( &ca->single_crl_lock );
+
+			BIO_write(bio, "\0", 1);
+			len = (size_t)BIO_get_mem_data(bio, &buf);
+			sinfo->issuer = BUF_strndup(buf, len);
+			BIO_free(bio);
+
+			if(sinfo->issuer == NULL)
+			{
+				PKI_log_err ("strndup() Memory Allocation error");
+				if (resp) PKI_X509_OCSP_RESP_free (resp);
+				resp = make_error_response(PKI_X509_OCSP_RESP_STATUS_INTERNALERROR);
+				goto end;
+			}
+
+			if( (sinfo->ca_id = BUF_strdup(ca->ca_id)) == NULL)
+			{
+				PKI_log_err ("strdup() Memory Allocation error");
+				if (resp) PKI_X509_OCSP_RESP_free (resp);
+				resp = make_error_response(PKI_X509_OCSP_RESP_STATUS_INTERNALERROR);
+				goto end;
+			}
+		}
+
+		PKI_RWLOCK_release_read ( &ca->single_crl_lock );
 
 		/* If the CA has a specific token, let's use that */
 		if (ca->token != NULL)
@@ -325,8 +700,7 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 			tk = ca->token;
 
 			if (conf->debug)
-				PKI_log_debug( "Using the specific token for the found CA (%s)",
-					ca->token_name);
+				PKI_log_debug( "Using the specific token for the found CA (%s)", ca->token_name);
 		}
 		else
 		{
@@ -350,11 +724,11 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 		// Here we check for the case where the CRL status is not ok, so
 		// we ask the client to try later, hopefully when we have a valid
 		// CRL to provide the response with
-		if (ca->crl_status != CRL_OK)
+		if (crl_status != CRL_OK)
 		{
 			// Check the status of the CRL, if it is not valid, we return a TRY_LATER
 			// or INTERNAL_ERROR responses
-			switch(ca->crl_status)
+			switch(crl_status)
 			{
 				case CRL_ERROR_NEXT_UPDATE:
 					// This situation does not provide any security risk, we can proceed
@@ -367,8 +741,7 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 					if (resp) PKI_X509_OCSP_RESP_free(resp);
 					resp = make_error_response(PKI_X509_OCSP_RESP_STATUS_INTERNALERROR);
 					if (conf->debug)
-						PKI_log_debug("sending INTERNAL ERROR (%s)", 
-							get_crl_status_info(ca->crl_status));
+						PKI_log_debug("sending INTERNAL ERROR (%s)", get_crl_status_info(crl_status));
 					goto end;
 					break;
 
@@ -386,7 +759,7 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 						resp = make_error_response(PKI_X509_OCSP_RESP_STATUS_TRYLATER);
 						if (conf->debug)
 							PKI_log_debug("sending TRYLATER (%s)", 
-								get_crl_status_info(ca->crl_status));
+								get_crl_status_info(crl_status));
 						goto end;
 					}
 					break;
@@ -397,8 +770,8 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 					PKI_X509_OCSP_RESP_add(resp, cid, PKI_OCSP_CERTSTATUS_UNKNOWN,
 						NULL, NULL, nextupd, CRL_REASON_UNSPECIFIED, NULL);
 					if (conf->debug)
-						PKI_log_debug("setting CERTSTATUS UNKNOWN for serial %s (%s)", 
-							parsedSerial, get_crl_status_info(ca->crl_status));
+						PKI_log_debug("setting CERTSTATUS UNKNOWN for serial %s (%s)",
+							parsedSerial, get_crl_status_info(crl_status));
 					continue;
 			}
 		}
@@ -420,6 +793,10 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 		{
 			long reason = -1;
 			void *ext = NULL;
+
+
+			PKI_log(PKI_LOG_INFO, "Status for certificate serial %s is REVOKED", parsedSerial );
+			sinfo->cert_status = V_OCSP_CERTSTATUS_REVOKED;
 
 			// If extensions are found, process them
 			if (entry->extensions)
@@ -457,26 +834,74 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 			}
 
 			if (conf->verbose)
-				PKI_log(PKI_LOG_INFO, "%s [serial %s]",
-					statusInfo[OCSPD_INFO_REVOKED], parsedSerial);
+				PKI_log(PKI_LOG_INFO, "%s [serial %s]", statusInfo[OCSPD_INFO_REVOKED], parsedSerial);
 		}
 		else if (ca == NULL )
 		{
 			if (conf->verbose)
-				PKI_log(PKI_LOG_INFO, "%s [serial %s]",
-						statusInfo[OCSPD_INFO_NON_RECOGNIZED_CA], parsedSerial);
+				PKI_log(PKI_LOG_INFO, "%s [serial %s]", statusInfo[OCSPD_INFO_NON_RECOGNIZED_CA], parsedSerial);
+
+			sinfo->cert_status = V_OCSP_CERTSTATUS_UNKNOWN;
 
 			PKI_X509_OCSP_RESP_add ( resp, cid, PKI_OCSP_CERTSTATUS_UNKNOWN, 
 				NULL, thisupd, nextupd, CRL_REASON_UNSPECIFIED, NULL );
 		}
 		else
 		{
-			if (conf->verbose)
-				PKI_log(PKI_LOG_INFO, "%s [serial %s]",
-					statusInfo[OCSPD_INFO_VALID_CERT], parsedSerial);
+			if(ca->check_issued_by_ca)
+			{
+				int ret = 0;
+				char *p_url = NULL;
 
-			PKI_X509_OCSP_RESP_add ( resp, cid, PKI_OCSP_CERTSTATUS_GOOD,
-				NULL, thisupd, nextupd, 0, NULL );
+				if( (ret = create_sql_query(conf, cid, ca, &p_url) ) != PKI_OK)
+				{
+					PKI_log_err ("Could not create SQL query!");
+					PKI_X509_OCSP_RESP_set_status ( resp, PKI_X509_OCSP_RESP_STATUS_TRYLATER );
+					PKI_log_err ("SENT TRYLATER (%s)", get_crl_status_info (crl_status));
+
+					goto end;
+				}
+      
+				ret = perform_sql_query(conf, cid, p_url);
+
+				PKI_Free(p_url);
+
+				/* certificate not found? */
+				if(ret != PKI_OK)
+				{
+					if (conf->verbose)
+						PKI_log(PKI_LOG_INFO, "%s [serial %s] (not issued by the requested CA)", 
+							statusInfo[OCSPD_INFO_UNKNOWN_STATUS], parsedSerial);
+
+					sinfo->cert_status = V_OCSP_CERTSTATUS_UNKNOWN;
+
+					if( conf->debug ) PKI_log_debug ( "Certificate not found in SQL database");
+					PKI_X509_OCSP_RESP_add ( resp, cid, PKI_OCSP_CERTSTATUS_UNKNOWN,
+						NULL, thisupd, nextupd, 0, NULL );
+				}
+				else
+        {
+					if (conf->verbose)
+						PKI_log(PKI_LOG_INFO, "%s [serial %s]", statusInfo[OCSPD_INFO_VALID_CERT], parsedSerial);
+
+					sinfo->cert_status = V_OCSP_CERTSTATUS_GOOD;
+
+					PKI_log_debug ( "Certificate found in SQL database");
+					PKI_X509_OCSP_RESP_add ( resp, cid, PKI_OCSP_CERTSTATUS_GOOD,
+						NULL, thisupd, nextupd, 0, NULL );
+				}
+			}
+			else
+			{
+				if (conf->verbose)
+					PKI_log(PKI_LOG_INFO, "%s [serial %s]", statusInfo[OCSPD_INFO_VALID_CERT],
+						parsedSerial);
+
+				sinfo->cert_status = V_OCSP_CERTSTATUS_GOOD;
+
+				PKI_X509_OCSP_RESP_add ( resp, cid, PKI_OCSP_CERTSTATUS_GOOD,
+					NULL, thisupd, nextupd, 0, NULL );
+			}
 		}
 	}
 
@@ -652,33 +1077,197 @@ int ocspd_resp_send_socket(int connfd, PKI_X509_OCSP_RESP *r,
 	return PKI_OK;
 }
 
-CA_LIST_ENTRY *OCSPD_CA_ENTRY_find(OCSPD_CONFIG *conf, OCSP_CERTID *cid)
+static CA_LIST_ENTRY *OCSPD_CA_ENTRY_find(OCSPD_CONFIG *conf, OCSP_CERTID *cid, int *resp_status)
 {
 	// STACK_OF(CA_ENTRY_CERTID) *a = NULL;
 
 	int i = 0, ret = PKI_OK;
+	int j;
+	int elements;
+  int err = 0;
 
 	OCSP_CERTID *b = NULL;
 	CA_LIST_ENTRY *ca = NULL;
-	CA_ENTRY_CERTID *tmp = NULL;
+	CA_ENTRY_CERTID *ca_cid = NULL;
+
+	int alg_id1 = 0;
+	int alg_id2 = 0;
+
+	char tmp_buf[128];
+	int tmp_len = sizeof(tmp_buf);
+
+
+	if (cid == NULL)
+	{
+		PKI_log_err("ERROR: missing CertID");
+		*resp_status = PKI_X509_OCSP_RESP_STATUS_INTERNALERROR;
+		return NULL;
+	}
 
 	b = cid;
 
 	if (conf == NULL || conf->ca_list == NULL ) 
 	{
 		PKI_log_err("ERROR: missing conf and/or ca_list");
+		*resp_status = PKI_X509_OCSP_RESP_STATUS_INTERNALERROR;
 		return NULL;
 	}
 
-	int elements = PKI_STACK_elements(conf->ca_list);
+	alg_id1 = OBJ_obj2nid(b->hashAlgorithm->algorithm);
+	if(alg_id1 == NID_undef)
+	{
+		PKI_log_err("ERROR: Cannot get hashAlgorithm from CA CertID");
+		*resp_status = PKI_X509_OCSP_RESP_STATUS_MALFORMEDREQUEST;
+		return NULL;
+	}
+
+	switch(alg_id1)
+	{
+		case NID_md5:
+			if(b->issuerNameHash->length != MD5_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerNameHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerNameHash->length, MD5_DIGEST_LENGTH);
+				err = 1;
+			}
+			else if(b->issuerKeyHash->length != MD5_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerKeyHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerKeyHash->length, MD5_DIGEST_LENGTH);
+				err = 1;
+			}
+			break;
+		case NID_sha1:
+			if(b->issuerNameHash->length != SHA_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerNameHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerNameHash->length, SHA_DIGEST_LENGTH);
+				err = 1;
+			}
+			else if(b->issuerKeyHash->length != SHA_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerKeyHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerKeyHash->length, SHA_DIGEST_LENGTH);
+				err = 1;
+			}
+			break;
+		case NID_sha224:
+			if(b->issuerNameHash->length != SHA224_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerNameHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerNameHash->length, SHA224_DIGEST_LENGTH);
+				err = 1;
+			}
+			else if(b->issuerKeyHash->length != SHA224_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerKeyHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerKeyHash->length, SHA224_DIGEST_LENGTH);
+				err = 1;
+			}
+			break;
+		case NID_sha256:
+			if(b->issuerNameHash->length != SHA256_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerNameHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerNameHash->length, SHA256_DIGEST_LENGTH);
+				err = 1;
+			}
+			else if(b->issuerKeyHash->length != SHA256_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerKeyHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerKeyHash->length, SHA256_DIGEST_LENGTH);
+				err = 1;
+			}
+			break;
+		case NID_sha384:
+			if(b->issuerNameHash->length != SHA384_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerNameHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerNameHash->length, SHA384_DIGEST_LENGTH);
+				err = 1;
+			}
+			else if(b->issuerKeyHash->length != SHA384_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerKeyHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerKeyHash->length, SHA384_DIGEST_LENGTH);
+				err = 1;
+			}
+			break;
+		case NID_sha512:
+			if(b->issuerNameHash->length != SHA512_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerNameHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerNameHash->length, SHA512_DIGEST_LENGTH);
+				err = 1;
+			}
+			else if(b->issuerKeyHash->length != SHA512_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerKeyHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerKeyHash->length, SHA512_DIGEST_LENGTH);
+				err = 1;
+			}
+			break;
+		case NID_ripemd160:
+			if(b->issuerNameHash->length != RIPEMD160_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerNameHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerNameHash->length, RIPEMD160_DIGEST_LENGTH);
+				err = 1;
+			}
+			else if(b->issuerKeyHash->length != RIPEMD160_DIGEST_LENGTH)
+			{
+				PKI_log_err("issuerKeyHash length mismatch (IS %d bytes - MUST %d bytes)", b->issuerKeyHash->length, RIPEMD160_DIGEST_LENGTH);
+				err = 1;
+			}
+			break;
+		default:
+			PKI_log_err("Unsupported digest algorithm for signature creation: %s\n", OBJ_nid2ln(alg_id1));
+			*resp_status = PKI_X509_OCSP_RESP_STATUS_MALFORMEDREQUEST;
+			return NULL;
+	}
+
+	if(err)
+	{
+		*resp_status = PKI_X509_OCSP_RESP_STATUS_MALFORMEDREQUEST;
+		return NULL;
+	}
+ 
+	elements = PKI_STACK_elements(conf->ca_list);
 	for ( i = 0; i < elements; i++ )
 	{
 		ca = (CA_LIST_ENTRY *) PKI_STACK_get_num(conf->ca_list, i);
 
-		tmp = ca->cid;
+		ca_cid = NULL;
+
+		/* check requested hash algorithm for CertID against our CA */
+		for(j = 0; j < sk_CA_ENTRY_CERTID_num(ca->sk_cid); j++)
+		{
+			CA_ENTRY_CERTID *tmp_cid;
+
+			tmp_cid = sk_CA_ENTRY_CERTID_value(ca->sk_cid, j);
+			if(!tmp_cid)
+				continue;
+
+			alg_id2 = OBJ_obj2nid(tmp_cid->hashAlgorithm->algorithm);
+			if(alg_id2 == NID_undef)
+			{
+				PKI_log_err("ERROR: Cannot get hashAlgorithm from CA CertID");
+				return NULL;
+			}
+
+			if (conf->debug) 
+			{
+				if(OBJ_obj2txt(tmp_buf, tmp_len, tmp_cid->hashAlgorithm->algorithm, 0) > 0)
+					PKI_log_debug("OCSPD_CA_ENTRY_find: Check requested CertID algorithm from config: %s", tmp_buf);
+			}
+
+			if(alg_id1 != alg_id2)
+				continue;
+
+			ca_cid = tmp_cid;
+			break;
+		}
+
+		/* no supported hash algorithm found - the supported algorithms are
+		 * equal for every loaded CA - exiting */
+		if(!ca_cid)
+		{
+			if(OBJ_obj2txt(tmp_buf, tmp_len, b->hashAlgorithm->algorithm, 0) > 0)
+				PKI_log_err("ERROR: No supported hash algorithm for requested CertID found (requested algorithm is %s)", tmp_buf);
+			else
+				PKI_log_err("ERROR: No supported hash algorithm for requested CertID found");
+			return NULL;
+		}
 
 		/* Check for hashes */
-		if((ret = ASN1_OCTET_STRING_cmp(tmp->nameHash, b->issuerNameHash)) != 0 )
+		if((ret = ASN1_OCTET_STRING_cmp(ca_cid->nameHash, b->issuerNameHash)) != 0 )
 		{
 			if (conf->debug) 
 			{
@@ -692,7 +1281,7 @@ CA_LIST_ENTRY *OCSPD_CA_ENTRY_find(OCSPD_CONFIG *conf, OCSP_CERTID *cid)
 			PKI_log_debug("CRL::CA [%s] nameHash OK", ca->ca_id);
 		}
 
-		if ((ret = ASN1_OCTET_STRING_cmp(tmp->keyHash, b->issuerKeyHash)) != 0)
+		if ((ret = ASN1_OCTET_STRING_cmp(ca_cid->keyHash, b->issuerKeyHash)) != 0)
 		{
 			if (conf->debug)
 			{
@@ -725,12 +1314,22 @@ X509_REVOKED *OCSPD_REVOKED_find (CA_LIST_ENTRY *ca, ASN1_INTEGER *serial) {
 	int end, cmp_val;
 	int found = 0;
 
+	PKI_RWLOCK_read_lock ( &ca->single_crl_lock );
+
 	/* If no entries are in the list, return directly */
-	if( !(ca) || !(ca->crl) || !(ca->crl_list)) return (r);
+	if( !(ca) || !(ca->crl_data->crl) || !(ca->crl_data->crl_list))
+	{
+		found = 1;
+		goto end;
+	}
  
 	/* Set the end point to the last one */
-	end = sk_X509_REVOKED_num(ca->crl_list) - 1;
-	if( end < 0 ) return (r);
+	end = sk_X509_REVOKED_num(ca->crl_data->crl_list) - 1;
+	if( end < 0 )
+	{
+		found = 1;
+		goto end;
+	}
 
 	while( cont == 1 ) {
 		/* We have not found the entry */
@@ -740,7 +1339,7 @@ X509_REVOKED *OCSPD_REVOKED_find (CA_LIST_ENTRY *ca, ASN1_INTEGER *serial) {
 		curr = (int) ((end - start) / 2) + start;
 
 		/* Get the entry from the stack */
-		r = sk_X509_REVOKED_value(ca->crl_list, curr);
+		r = sk_X509_REVOKED_value(ca->crl_data->crl_list, curr);
 
 		/* Compare the two serials */
 		cmp_val = ASN1_INTEGER_cmp(r->serialNumber, serial);
@@ -758,6 +1357,10 @@ X509_REVOKED *OCSPD_REVOKED_find (CA_LIST_ENTRY *ca, ASN1_INTEGER *serial) {
 			break;
 		}
 	}
+
+end:
+	PKI_RWLOCK_release_read ( &ca->single_crl_lock );
+
 	if( found )
 		return (r);
 	else

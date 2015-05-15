@@ -24,24 +24,17 @@ static char *ocspd_usage[] = {
 " -c file         - The configuration file\n",
 " -d              - Daemon, detach from current console\n",
 " -r dir          - Directory where to jail the running process (chroot)\n",
-" -k pwd          - Password protecting the private key (if any)\n",
 " -debug          - Debug mode (exit after the first request)\n",
-" -testmode       - Use test mode (wrong signatures w/ 1st bit flipped\n",
+" -testmode       - Use test mode (wrong signatures w/ 1st bit flipped)\n",
 " -stdout         - Route all logging messages to stdout\n",
 " -v              - Talk alot while doing things\n",
 NULL
 };
 
-/* Staic variables */
-char *prgname = "ocspd";
-char *version = VERSION;
-
 OCSPD_CONFIG *ocspd_conf = NULL;
 
 /* Local functions prototypes */
 int  writePid(int pid, char *pidfile);
-void my_exit(int cod, char *txt);
-void mask_signals();
 
 /* Main */
 int main ( int argc, char *argv[] ) {
@@ -52,10 +45,11 @@ int main ( int argc, char *argv[] ) {
 	int verbose   = 0;
 	int debug     = 0;
 	int testmode  = 0;
+	int valgrind  = 0;
 
 	int daemon = 0;
 	int badops = 0;
-	int ret = 0;
+	int ret = -1;
 
 	char *configfile = NULL;
 	char **pp = NULL;
@@ -83,6 +77,8 @@ int main ( int argc, char *argv[] ) {
 			debug=1;
 		} else if (strcmp(*argv,"-testmode") == 0) {
 			testmode=1;
+		} else if (strcmp(*argv,"-valgrind") == 0) {
+			valgrind=1;
 		} else if (strcmp(*argv,"-d") == 0) {
 			daemon=1;
 		} else if (strcmp(*argv,"-stdout") == 0) {
@@ -112,13 +108,16 @@ bad:
 	if(( PKI_log_init (log_type, log_level, NULL,
 			debug, NULL )) == PKI_ERR ) {
 		fprintf(stderr, "OCSPD, can not initiating logs! Aborting!\n\n");
-		exit(1);
+		goto err;
 	}
 
-	PKI_log(PKI_LOG_ALWAYS, "OpenCA OCSPD v%s - starting.", VERSION );
+	PKI_log(PKI_LOG_ALWAYS, "OpenCA OCSPD v%s - starting (%s).", VERSION, SSLeay_version(SSLEAY_VERSION));
+	PKI_log(PKI_LOG_ALWAYS, "OpenCA OCSPD adapted by RVE. Version p1.0.5.");
 
 	if(( ocspd_conf = OCSPD_load_config( configfile )) == NULL ) {
-		my_exit(1, "ERROR::can not load config file!\n");
+		fprintf(stderr, "ERROR::can not load config file!\n\n");
+		PKI_log_err("ERROR::can not load config file!");
+		goto err;
 	}
 
 	if( debug ) ocspd_conf->debug = 1;
@@ -128,7 +127,13 @@ bad:
 		PKI_log(PKI_LOG_ALWAYS, "WARNING: Test Mode Used, All Signatures "
 			"will be INVALID (first bit flipped)");
 		ocspd_conf->testmode = 1;
-	};
+	}
+
+	if( valgrind ) 
+	{
+		PKI_log(PKI_LOG_ALWAYS, "WARNING: Valgrind Mode - Exit after first request");
+		ocspd_conf->valgrind = 1;
+	}
 
 
 	/*****************************************************************/
@@ -155,20 +160,19 @@ bad:
 		writePid( ppid, ocspd_conf->pidfile );
 	}
 
-	// Mask un-wanted signals
-	mask_signals();
-
 	// Let's now start the threaded server
-	start_threaded_server( ocspd_conf );
-
-	goto end;
-
+	if( ( ret = start_threaded_server( ocspd_conf ) ) == PKI_OK)
+		goto end;
 
 err:
-	ret = -1;
-	my_exit( -1, "ERROR:General error, please check the logs");
+	PKI_log_err("ERROR:General error, please check the logs");
 
 end:
+	if(ocspd_conf) OCSPD_free_config(ocspd_conf);
+	if(ocspd_conf) PKI_Free(ocspd_conf);
+	PKI_final_all();
+	PKI_final_thread();  // also needed for the main thread
+
 	return (ret);
 }
 
@@ -193,21 +197,3 @@ int writePid ( int pid, char *pidfile ) {
 	return(1);
 }
 
-void mask_signals()
-{
-	struct sigaction sa;
-
-	sa.sa_handler = SIG_IGN;
-	sa.sa_flags = 0;
-
-	if (sigaction(SIGPIPE, &sa, 0) == -1)
-	{
-		PKI_log(PKI_LOG_ERR, "Can not mask SIGPIPE, aborting!\n\n");
-		exit(1);
-	}
-}
-
-void my_exit(int cod, char *txt) {
-	PKI_log(PKI_LOG_ERR, "%s - %s (exit with %d)\n\n", prgname, txt, cod );
-	exit(cod);
-}

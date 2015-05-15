@@ -23,6 +23,37 @@
       <pki:crlReloadExpired>yes</pki:crlReloadExpired>
       <!-- Check CRLs validity every x seconds -->
       <pki:crlCheckValidity>600</pki:crlCheckValidity>
+      <!-- Skip CRL reload if it was not modified after the last load -->
+      <pki:crlCheckModificationTime>no</pki:crlCheckModificationTime>
+      <!-- OCSP responder name - used for statistic logging (e.g. if more than
+           one OCSP responder is configured and all responder log into the same
+           database) -->
+      <!--<pki:responderName>OCSPD Test#1</pki:responderName>-->
+      <!-- Statistic logging
+        Entries can be given in form of <Identifier>[=ColumnName][,<Identifier>[=ColumnName]], etc.
+        The folowing identifier are supported:
+        Identifier     Default ColumnName
+        =========================================
+        ResponderName  responder_name
+        StartTime      starttime
+        EndTime        endtime
+        ResponseStatus response_status
+        CertStatus     cert_status
+        Serial         serialnumber
+        Issuer         issuer
+        CaName         caname
+        IP             ip
+        Duration       duration
+
+        If no ColumName is given the default one will be used.
+      -->
+
+      <!-- Specify the DB URI where the statistic info is written to -->
+      <!-- mysql://[<user>:<password>]@<host>[:<port>]/<dbname>/<table> -->
+      <!-- instead of specifying username/password here, the my.cnf file can be used -->
+      <!--<pki:logStatsUrl>mysql://dbuser:password@localhost/ocsp/statistics</pki:logStatsUrl>-->
+      <!-- Specify the information (identifier) that shall be logged -->
+      <!--<pki:logStatsItems>ResponderName,IP,ResponseStatus,CertStatus,Serial,CaName,Duration</pki:logStatsItems>-->
    </pki:general>
    <!-- Security Related Configurations -->
    <pki:security>
@@ -49,10 +80,20 @@
            socket if no data is received within `timeout` seconds -->
       <pki:timeOut>5</pki:timeOut>
    </pki:network>
-   <!-- OCSP response configuration -->
-   <pki:response>
+   <!-- OCSP request configuration -->
+   <pki:request>
       <!-- Max size of incoming requests -->
       <pki:maxReqSize>8192</pki:maxReqSize>
+   </pki:request>
+   <!-- OCSP response configuration -->
+   <pki:response>
+      <!-- Digest Algorithm used for building the issuerNameHash and
+           issuerKeyHash digest. More than one value can be used:
+           e.g. >SHA1,SHA256<
+           The algorithms must be given in capital letters. Every algorithm
+           supported by OpenSSL can be used.
+           If not configured the digestAlgorithm (see below) ist used. -->
+      <pki:issuerHashDigestAlgorithm>SHA1,SHA256</pki:issuerHashDigestAlgorithm>
       <!-- Digest Algorithm to be used when building responses, currently
            the standard specifies SHA1 as the only supported algorithm -->
       <pki:digestAlgorithm>SHA1</pki:digestAlgorithm>

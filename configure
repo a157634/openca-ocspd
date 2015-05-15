@@ -12062,7 +12062,7 @@ fi
 if [ -f "/etc/issue" ] ; then
    DIST_NAME=`head -n 1 /etc/issue | cut -f 1,1 -d ' '`
 else
-   DIST_NAME=`echo ${build_os} | $EGREP -o [A-Za-z]+`
+   DIST_NAME=`echo ${build_os} | $EGREP -o [A-Za-z]+ | head -n 1`
 fi
 
 

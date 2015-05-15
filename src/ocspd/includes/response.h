@@ -13,8 +13,8 @@
 
 /* Functions */
 
-PKI_X509_OCSP_RESP *make_ocsp_response( PKI_X509_OCSP_REQ *req, 
-						OCSPD_CONFIG *conf );
+PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *conf,
+						OCSPD_SESSION_INFO *sinfo);
 
 int ocspd_resp_send_socket(int connfd, PKI_X509_OCSP_RESP *resp, 
 						OCSPD_CONFIG *conf);
@@ -22,4 +22,4 @@ int ocspd_resp_send_socket(int connfd, PKI_X509_OCSP_RESP *resp,
 /* ------------------------- Find Functions ---------------------------- */
 
 X509_REVOKED *OCSPD_REVOKED_find (CA_LIST_ENTRY *ca, ASN1_INTEGER *serial);
-CA_LIST_ENTRY *OCSPD_CA_ENTRY_find ( OCSPD_CONFIG *conf, OCSP_CERTID *cid );
+//CA_LIST_ENTRY *OCSPD_CA_ENTRY_find ( OCSPD_CONFIG *conf, OCSP_CERTID *cid );
