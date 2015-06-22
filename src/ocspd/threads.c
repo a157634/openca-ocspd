@@ -269,9 +269,11 @@ void * thread_main ( void *arg )
 		pthread_cleanup_pop(0);
 
 		// Communicate to the main thread to listen for the next connection
+		pthread_cleanup_push(cleanup_handler, &ocspd_conf->mutexes[SRVFD_MUTEX]);
 		PKI_MUTEX_acquire ( &ocspd_conf->mutexes[SRVFD_MUTEX] );
 		PKI_COND_signal ( &ocspd_conf->condVars[SRVFD_COND] );
 		PKI_MUTEX_release ( &ocspd_conf->mutexes[SRVFD_MUTEX] );
+		pthread_cleanup_pop(0);
 
 		// Set start timer
 		if(gettimeofday(&sinfo.start, NULL) != 0)

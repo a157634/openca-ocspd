@@ -292,11 +292,11 @@ static void * thread_con_handler ( void *arg )
 		goto exit_thread;
 	}
 
-	pthread_cleanup_push(cleanup_handler, &ocspd_conf->mutexes[CLIFD_MUTEX]);
 
 	for ( ; ; ) 
 	{
 		// Acquires the Mutex for handling the ocspd_conf->connfd
+		pthread_cleanup_push(cleanup_handler, &ocspd_conf->mutexes[CLIFD_MUTEX]);
 		PKI_MUTEX_acquire ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
 		PKI_log_debug ( "Wait for a new connection..");
 		if ((ocspd_conf->connfd = PKI_NET_accept(ocspd_conf->listenfd, 0)) == -1)
@@ -318,9 +318,11 @@ static void * thread_con_handler ( void *arg )
 		// Communicate that there is a good socket waiting for a thread to pickup
 		PKI_COND_broadcast ( &ocspd_conf->condVars[CLIFD_COND] );
 		PKI_MUTEX_release ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
+		pthread_cleanup_pop(0);
 
 		// Waits for a thread to successfully pickup the socket
 		PKI_log_debug ( "acquire next mutex..");
+		pthread_cleanup_push(cleanup_handler, &ocspd_conf->mutexes[SRVFD_MUTEX]);
 		PKI_MUTEX_acquire ( &ocspd_conf->mutexes[SRVFD_MUTEX] );
 		while (ocspd_conf->connfd > 2)
 		{
@@ -330,6 +332,7 @@ static void * thread_con_handler ( void *arg )
 		}
 		PKI_MUTEX_release ( &ocspd_conf->mutexes[SRVFD_MUTEX] );
 		PKI_log_debug ( "connection handled by a thread");
+		pthread_cleanup_pop(0);
 
 		if(ocspd_conf->valgrind)
 		{
@@ -337,7 +340,6 @@ static void * thread_con_handler ( void *arg )
 		}
 	}
 
-	pthread_cleanup_pop(0);
 
 exit_thread:
 	PKI_final_thread();
@@ -365,7 +367,7 @@ int start_threaded_server ( OCSPD_CONFIG * ocspd_conf )
 				ocspd_conf->token_config_dir, ocspd_conf->token_name)
 								== PKI_ERR)
 		{
-			PKI_log_err( "Can not load default token (%s/%s)",
+			PKI_log_err( "Can not load default token (%s:%s)",
 				ocspd_conf->cnf_filename, ocspd_conf->token_name );
 			return(1);
 		}
@@ -404,14 +406,6 @@ int start_threaded_server ( OCSPD_CONFIG * ocspd_conf )
 		if (ca->token_name == NULL)
 			continue;
 
-		if ((ca->token = PKI_TOKEN_new_null()) == NULL)
-		{
-			PKI_ERROR(PKI_ERR_MEMORY_ALLOC, NULL);
-			return (1);
-		}
-
-		PKI_TOKEN_cred_set_cb ( ocspd_conf->token, NULL, NULL);
-
 		rv = PKI_TOKEN_init(ca->token, ca->token_config_dir, ca->token_name);
 		if (rv != PKI_OK)
 		{
@@ -420,6 +414,8 @@ int start_threaded_server ( OCSPD_CONFIG * ocspd_conf )
 				ca->token_name, ca->ca_id, ca->token_config_dir );
 			return (rv);
 		}
+
+		PKI_TOKEN_cred_set_cb ( ocspd_conf->token, NULL, NULL);
 
 		rv = PKI_TOKEN_login(ca->token);
 		if (rv != PKI_OK)
