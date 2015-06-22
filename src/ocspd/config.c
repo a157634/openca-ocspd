@@ -945,7 +945,12 @@ int OCSPD_build_ca_list ( OCSPD_CONFIG *handler,
  			   it to avoid problems with Thread Initialization */
 			ca->server_cert = NULL;
 			ca->token_name = tmp_s;
-			ca->token = PKI_TOKEN_new_null();
+			if ((ca->token = PKI_TOKEN_new_null()) == NULL)
+			{
+				PKI_log( PKI_LOG_ERR, "Memory error for new token");
+				CA_LIST_ENTRY_free ( ca );
+				continue;
+			}
 
 			if ((tmp_s = PKI_CONFIG_get_value ( cnf, "/caConfig/pkiConfigDir" )) != NULL) {
 				ca->token_config_dir = strdup( tmp_s );
@@ -1313,10 +1318,11 @@ void CA_LIST_ENTRY_free ( CA_LIST_ENTRY *ca ) {
 
 	CRL_DATA_free_all(ca->crl_data);
 
-	if ( ca->token_name ) PKI_Free ( ca->token_name );
-	if ( ca->token ) PKI_TOKEN_free ( ca->token );
+	if ( ca->token_name )                 PKI_Free ( ca->token_name );
+	if ( ca->token )                      PKI_TOKEN_free_void ( ca->token );
 
-	if ( ca->db_url ) URL_free ( ca->db_url );
+	if ( ca->token_config_dir )           PKI_Free ( ca->token_config_dir );
+	if ( ca->db_url )                     URL_free ( ca->db_url );
 	if ( ca->ca_cert_digest )             PKI_DIGEST_free ( ca->ca_cert_digest );
 	if ( ca->db_column_ca_fingerprint )   PKI_Free ( ca->db_column_ca_fingerprint );
 	if ( ca->db_column_issuer_name_hash ) PKI_Free ( ca->db_column_issuer_name_hash );
