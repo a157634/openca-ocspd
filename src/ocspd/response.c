@@ -704,6 +704,8 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 		}
 		else
 		{
+			PKI_log_debug( "Using the global configured token for the found CA (%s)", conf->token_name);
+
 			// If no specific token but a different server_cert
  			// is to be used, let's report it in debug mode
 			if (ca->server_cert)
