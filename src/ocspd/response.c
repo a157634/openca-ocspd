@@ -691,8 +691,8 @@ PKI_X509_OCSP_RESP *make_ocsp_response(PKI_X509_OCSP_REQ *req, OCSPD_CONFIG *con
 				goto end;
 			}
 		}
-
-		PKI_RWLOCK_release_read ( &ca->single_crl_lock );
+		else
+			PKI_RWLOCK_release_read ( &ca->single_crl_lock );
 
 		/* If the CA has a specific token, let's use that */
 		if (ca->token != NULL)
