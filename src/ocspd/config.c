@@ -132,26 +132,29 @@ static int parse_stats_items(char *items, unsigned long *item_flags, char *base_
 	long  len = 0;
 
 
-  // copy original ocsp_stats_item_tbl due to static const definition
-  // we need this to modify the entry element for ordering the occurence of the logStatsItems
-  if( (tbl_cpy = PKI_Malloc(sizeof(ocsp_stats_item_tbl))) == NULL)
+	// copy original ocsp_stats_item_tbl due to static const definition
+	// we need this to modify the entry element for ordering the occurence of the logStatsItems
+	if( (tbl_cpy = PKI_Malloc(sizeof(ocsp_stats_item_tbl))) == NULL)
 	{
 		PKI_log_err("Memory allocation error!");
 		return(ret);
 	}
-  memcpy(tbl_cpy, ocsp_stats_item_tbl, sizeof(ocsp_stats_item_tbl));
+	memcpy(tbl_cpy, ocsp_stats_item_tbl, sizeof(ocsp_stats_item_tbl));
 
 
-	if( (membio = BIO_new(BIO_s_mem())) == NULL)
+	if(base_url)
 	{
-		PKI_log_err("Memory allocation error!");
-		goto end;
-	}
+		if( (membio = BIO_new(BIO_s_mem())) == NULL)
+		{
+			PKI_log_err("Memory allocation error!");
+			goto end;
+		}
 
-	if(BIO_printf(membio, "%s?", base_url) <= 0)
-	{
-		PKI_log_err ("BIO_printf(logStatsUrl) failed!\n");
-		goto end;
+		if(BIO_printf(membio, "%s?", base_url) <= 0)
+		{
+			PKI_log_err ("BIO_printf(logStatsUrl) failed!\n");
+			goto end;
+		}
 	}
 
 	*item_flags = 0;
@@ -160,7 +163,7 @@ static int parse_stats_items(char *items, unsigned long *item_flags, char *base_
 	{
 		if( (next = strchr(items, ',')) != NULL)
 			*next++ = 0;
-		
+
 		if( (column = strchr(items, '=')) != NULL)
 		{
 			*column++ = 0;
@@ -172,10 +175,13 @@ static int parse_stats_items(char *items, unsigned long *item_flags, char *base_
 		{
 			if(strcmp_nocase(items, tbl->name) == 0)
 			{
-				if(column)
-					tbl->entry = column;
-				else
-					tbl->entry = tbl->column;;
+				if(base_url)
+				{
+					if(column)
+						tbl->entry = column;
+					else
+						tbl->entry = tbl->column;;
+				}
 
 				*item_flags |= tbl->flag;
 
@@ -188,46 +194,51 @@ static int parse_stats_items(char *items, unsigned long *item_flags, char *base_
 			break;
 	}
 
-  // temporary usage of len to indicate the number of items
-	for(tbl = tbl_cpy; tbl->name; tbl++)
+	if(base_url)
 	{
-		if(*item_flags & tbl->flag)
+		// temporary usage of len to indicate the number of items
+		for(tbl = tbl_cpy; tbl->name; tbl++)
 		{
-			if(BIO_printf(membio, "%s%s", len++ ? ",":"", tbl->entry) <= 0)
+			if(*item_flags & tbl->flag)
 			{
-				PKI_log_err ("BIO_printf(column) failed!\n");
-				goto end;
+				if(BIO_printf(membio, "%s%s", len++ ? ",":"", tbl->entry) <= 0)
+				{
+					PKI_log_err ("BIO_printf(column) failed!\n");
+					goto end;
+				}
 			}
 		}
-	}
 
-	if(BIO_write(membio, "\x0", 1) <= 0)
-	{
-		PKI_log_err ("BIO_write() failed!\n");
-		goto end;
-	}
+		if(BIO_write(membio, "\x0", 1) <= 0)
+		{
+			PKI_log_err ("BIO_write() failed!\n");
+			goto end;
+		}
 
-	if( (len = BIO_get_mem_data(membio, &column) ) <= 0)
-	{
-		PKI_log_err ( "BIO_get_mem_data() failed");
-		goto end;
-	}
+		if( (len = BIO_get_mem_data(membio, &column) ) <= 0)
+		{
+			PKI_log_err ( "BIO_get_mem_data() failed");
+			goto end;
+		}
 
-	if ((*log_stats_url = URL_new ( column )) == NULL)
-	{
-		PKI_log_err ( "logStatsUrl not parsable (%s)", column );
-		goto end;
-	}
+		if ((*log_stats_url = URL_new ( column )) == NULL)
+		{
+			PKI_log_err ( "logStatsUrl not parsable (%s)", column );
+			goto end;
+		}
 
-	PKI_log_debug("logStatsUrl: %s", column);
+		PKI_log_debug("logStatsUrl: %s", column);
+	}
 
 	ret = 0;
 
 end:
 	if(membio) BIO_free(membio);
-  if(tbl_cpy) PKI_Free(tbl_cpy);
+	if(tbl_cpy) PKI_Free(tbl_cpy);
+
 	return(ret);
 }
+
 
 OCSPD_CONFIG * OCSPD_load_config(char *configfile)
 {
@@ -428,18 +439,18 @@ OCSPD_CONFIG * OCSPD_load_config(char *configfile)
 	}
 
 	/* logStatsUrl */
-	if ((tmp_s = PKI_CONFIG_get_value( cnf, "/serverConfig/general/logStatsUrl")) != NULL)
-	{
-		/* logStatsItems */
-		if ((tmp_s2 = PKI_CONFIG_get_value( cnf, "/serverConfig/general/logStatsItems")) != NULL)
-		{
-      if(parse_stats_items(tmp_s2, &(h->log_stats_flags), tmp_s, &(h->log_stats_url)) != 0)
-			  PKI_log_err ( "logStatsItems not parsable. No statistics logging will be performed." );
+	tmp_s = PKI_CONFIG_get_value( cnf, "/serverConfig/general/logStatsUrl");
 
-			PKI_Free(tmp_s2);
-		}
-		PKI_Free(tmp_s);
+
+	/* logStatsItems */
+	if ((tmp_s2 = PKI_CONFIG_get_value( cnf, "/serverConfig/general/logStatsItems")) != NULL)
+	{
+    if(parse_stats_items(tmp_s2, &(h->log_stats_flags), tmp_s, &(h->log_stats_url)) != 0)
+		  PKI_log_err ( "logStatsItems not parsable. No statistics logging will be performed." );
+
+		PKI_Free(tmp_s2);
 	}
+	if(tmp_s) PKI_Free(tmp_s);
 
 	/* Server Privileges */
 	if ((tmp_s = PKI_CONFIG_get_value(cnf, "/serverConfig/security/user")) != NULL)

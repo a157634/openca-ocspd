@@ -8,6 +8,22 @@ extern const char *x509statusInfo[];
 /* Thread Function Prototype */
 void * thread_main ( void *arg );
 
+static const char *responseStatus[] = {
+		"Successful",
+		"MalformedRequest",
+		"InternalError",
+		"tryLater",
+		"n/a",
+		"SigRequired",
+		"Unauthorized"
+};
+
+static const char *certStatus[] = {
+		"GOOD",
+		"REVOKED",
+		"UNKNOWN"
+};
+
 
 static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 {
@@ -20,6 +36,8 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 	int first = 1;
 	struct tm tm;
 	char stime[25];
+	char *delimiter = NULL;
+	char prefix[64] = {'\0'};
 
 
 	if( (membio = BIO_new(BIO_s_mem())) == NULL)
@@ -28,19 +46,27 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 		return(PKI_ERR);
 	}
 
+	if(ocspd_conf->log_stats_url)
+		delimiter = "','";
+	else
+		delimiter = "; ";
+
 	for(tbl = ocsp_stats_item_tbl; tbl->name; tbl++)
 	{
 		int err = 0;
+
+		if(!ocspd_conf->log_stats_url)
+			snprintf(prefix, sizeof(prefix), "%s:", tbl->name);
 
 		// For the first item a >'< will be prepended by URL_put_data_url()
 		// After the last item a >'< will be appended by URL_put_data_url()
 		switch(ocspd_conf->log_stats_flags & tbl->flag)
 		{
 			case OCSPD_STATS_INFO_STARTTIME:
-				err = BIO_printf(membio, "%s%lld", first ? "" : "','", (long long)(((long long)sinfo->start.tv_sec * 1000) + (long long)sinfo->start.tv_usec / 1000));
+				err = BIO_printf(membio, "%s%s%lld", first ? "" : delimiter, prefix, (long long)(((long long)sinfo->start.tv_sec * 1000) + (long long)sinfo->start.tv_usec / 1000));
 				break;
 			case OCSPD_STATS_INFO_ENDTIME:
-				err = BIO_printf(membio, "%s%lld", first ? "" : "','", (long long)(((long long)sinfo->stop.tv_sec * 1000) + (long long)sinfo->stop.tv_usec / 1000));
+				err = BIO_printf(membio, "%s%s%lld", first ? "" : delimiter, prefix, (long long)(((long long)sinfo->stop.tv_sec * 1000) + (long long)sinfo->stop.tv_usec / 1000));
 				break;
 			case OCSPD_STATS_ARRIVAL_TIME:
 				// This is for logging an SQL TIMESTAMP with fractional part (support by MySQL 5.6 and above)
@@ -49,7 +75,7 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 				if(gmtime_r(&sinfo->start.tv_sec, &tm) != NULL)
 				{
 					if(strftime(stime, sizeof(stime), "%Y-%m-%d %H:%M:%S", &tm) > 0)
-						err = BIO_printf(membio, "%s%s%ld", first ? "" : "','", stime, sinfo->start.tv_usec/1000);
+						err = BIO_printf(membio, "%s%s%s%ld", first ? "" : delimiter, prefix, stime, sinfo->start.tv_usec/1000);
 					else
 						PKI_log_err("strftime() returnd 0 - unable to calculate arrival time.");
 				}
@@ -60,7 +86,7 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 				if(gmtime_r(&sinfo->stop.tv_sec, &tm) != NULL)
 				{
 					if(strftime(stime, sizeof(stime), "%Y-%m-%d %H:%M:%S", &tm) > 0)
-						err = BIO_printf(membio, "%s%s%ld", first ? "" : "','", stime, sinfo->stop.tv_usec/1000);
+						err = BIO_printf(membio, "%s%s%s%ld", first ? "" : delimiter, prefix, stime, sinfo->stop.tv_usec/1000);
 					else
 						PKI_log_err("strftime() returnd 0 - unable to calculate departure time.");
 				}
@@ -68,40 +94,46 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 					PKI_log_err("gmtime_r() failed - unable to calculate departure time.");
 				break;
 			case OCSPD_STATS_INFO_RESPONSE_STATUS:
-				err = BIO_printf(membio, "%s%d", first ? "" : "','", sinfo->resp_status);
+				if(ocspd_conf->log_stats_url)
+					err = BIO_printf(membio, "%s%s%d", first ? "" : delimiter, prefix, sinfo->resp_status);
+        else
+					err = BIO_printf(membio, "%s%s%s", first ? "" : delimiter, prefix, responseStatus[sinfo->resp_status]);
 				break;
 			case OCSPD_STATS_INFO_CERT_STATUS:
-				err = BIO_printf(membio, "%s%d", first ? "" : "','", sinfo->cert_status);
+				if(ocspd_conf->log_stats_url)
+					err = BIO_printf(membio, "%s%s%d", first ? "" : delimiter, prefix, sinfo->cert_status);
+        else
+					err = BIO_printf(membio, "%s%s%s", first ? "" : delimiter, prefix, certStatus[sinfo->cert_status]);
 				break;
 			case OCSPD_STATS_INFO_SERIAL:
 				if(sinfo->serial != NULL)
-					err = BIO_printf(membio, "%s%s", first ? "" : "','", sinfo->serial);
+					err = BIO_printf(membio, "%s%s%s", first ? "" : delimiter, prefix, sinfo->serial);
 				else
-					err = BIO_printf(membio, "%sn/a", first ? "" : "','");
+					err = BIO_printf(membio, "%s%sn/a", first ? "" : delimiter, prefix);
 				break;
 			case OCSPD_STATS_INFO_ISSUER:
 				if(sinfo->issuer != NULL)
-					err = BIO_printf(membio, "%s%s", first ? "" : "','", sinfo->issuer);
+					err = BIO_printf(membio, "%s%s%s", first ? "" : delimiter, prefix, sinfo->issuer);
 				else
-					err = BIO_printf(membio, "%sn/a", first ? "" : "','");
+					err = BIO_printf(membio, "%s%sn/a", first ? "" : delimiter, prefix);
 				break;
 			case OCSPD_STATS_INFO_CANAME:
 				if(sinfo->ca_id != NULL)
-					err = BIO_printf(membio, "%s%s", first ? "" : "','", sinfo->ca_id);
+					err = BIO_printf(membio, "%s%s%s", first ? "" : delimiter, prefix, sinfo->ca_id);
 				else
-					err = BIO_printf(membio, "%sn/a", first ? "" : "','");
+					err = BIO_printf(membio, "%s%sn/a", first ? "" : delimiter, prefix);
 				break;
 			case OCSPD_STATS_INFO_IP:
-				err = BIO_printf(membio, "%s%s", first ? "" : "','", inet_ntoa(sinfo->cliaddr.sin_addr));
+				err = BIO_printf(membio, "%s%s%s", first ? "" : delimiter, prefix, inet_ntoa(sinfo->cliaddr.sin_addr));
 				break;
 			case OCSPD_STATS_INFO_DURATION:
-				err = BIO_printf(membio, "%s%u", first ? "" : "','", sinfo->duration);
+				err = BIO_printf(membio, "%s%s%u", first ? "" : delimiter, prefix, sinfo->duration);
 				break;
 			case OCSPD_STATS_RESPONDER_NAME:
 				if(ocspd_conf->responder_name != NULL)
-					err = BIO_printf(membio, "%s%s", first ? "" : "','", ocspd_conf->responder_name);
+					err = BIO_printf(membio, "%s%s%s", first ? "" : delimiter, prefix, ocspd_conf->responder_name);
 				else
-					err = BIO_printf(membio, "%sn/a", first ? "" : "','");
+					err = BIO_printf(membio, "%s%sn/a", first ? "" : delimiter, prefix);
 				break;
 			default: // no match
 				continue;
@@ -122,16 +154,30 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 		goto end;
 	}
 
-	if ((pki_mem = PKI_MEM_new_data((size_t)len, (unsigned char *)p_data)) == NULL)
+	if(ocspd_conf->log_stats_url)
 	{
-		PKI_ERROR(PKI_ERR_MEMORY_ALLOC, NULL);
-		goto end;
-	}
+		if ((pki_mem = PKI_MEM_new_data((size_t)len, (unsigned char *)p_data)) == NULL)
+		{
+			PKI_ERROR(PKI_ERR_MEMORY_ALLOC, NULL);
+			goto end;
+		}
 
-	if(URL_put_data_url(ocspd_conf->log_stats_url, pki_mem, NULL, NULL, 0, 0, NULL) != PKI_OK)
-		PKI_log_err ( "URL_put_data_url() failed");
+		if(URL_put_data_url(ocspd_conf->log_stats_url, pki_mem, NULL, NULL, 0, 0, NULL) != PKI_OK)
+			PKI_log_err ( "URL_put_data_url() failed");
+		else
+			ret = 0;
+	}
 	else
+	{
+		if(BIO_write(membio, ";\x0", 2) <= 0)
+		{
+			PKI_log_err ("BIO_write() failed!\n");
+			goto end;
+		}
+
+		PKI_log(PKI_LOG_ALWAYS, "%s", p_data);
 		ret = 0;
+	}
 
 end:
 	if(membio)  BIO_free(membio);
@@ -346,7 +392,7 @@ void * thread_main ( void *arg )
 			// we calculate directly milliseconds for further usage
 			sinfo.duration = (unsigned int)((sinfo.stop.tv_sec - sinfo.start.tv_sec) * 1000 + (sinfo.stop.tv_usec - sinfo.start.tv_usec) / 1000);
 
-			if(ocspd_conf->log_stats_url)
+			if(ocspd_conf->log_stats_flags)
 				(void)log_stats_data(&sinfo);
 		}
 
