@@ -32,6 +32,7 @@ static void handle_sigusr1 ( int sig )
 	int i;
 	int rv = 0;
 	char err_str[128];
+	int valgrind = ocspd_conf->valgrind;
   
 
 	if(pthread_equal(PKI_THREAD_self(), th_id_main) != 0) // <> 0 means the IDs are equal
@@ -79,8 +80,10 @@ static void handle_sigusr1 ( int sig )
 		PKI_final_thread();  // also needed for the main thread
 
 		PKI_log_debug("Exiting main thread");
-		pthread_exit((void*)&ret);
-		//exit(1); // ugly but needed here
+		if(valgrind)
+			pthread_exit((void*)&ret);
+		else
+			exit(0);
 	}
   else if(pthread_equal(PKI_THREAD_self(), th_id_con_hdl) != 0) // <> 0 means the IDs are equal
 	{
@@ -174,6 +177,7 @@ static void * thread_sig_handler ( void *arg )
 			PKI_log_err("sigdelset(SIGHUP) failed: [%d] %s", errno, err_str);
 			return(NULL);
 		}
+
 		sigwait( &signal_set, &sig );
 
 		/* when we get here, we've caught a signal */
@@ -265,6 +269,7 @@ static void * thread_con_handler ( void *arg )
 	char err_str[512];
 	sigset_t signal_set;
 	int ret = PKI_OK;
+	int err = 0;
 
 
 	th_id_con_hdl = PKI_THREAD_self();
@@ -298,46 +303,50 @@ static void * thread_con_handler ( void *arg )
 		// Acquires the Mutex for handling the ocspd_conf->connfd
 		pthread_cleanup_push(cleanup_handler, &ocspd_conf->mutexes[CLIFD_MUTEX]);
 		PKI_MUTEX_acquire ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
-		PKI_log_debug ( "Wait for a new connection..");
-		if ((ocspd_conf->connfd = PKI_NET_accept(ocspd_conf->listenfd, 0)) == -1)
+		PKI_log_debug ( "Con thread: Wait for a new connection..");
+
+		ocspd_conf->connfd = PKI_NET_accept(ocspd_conf->listenfd, 0);
+		err = errno;
+
+		if(ocspd_conf->connfd != -1)
+		{
+			// Communicate that there is a good socket waiting for a thread to pickup
+			PKI_COND_broadcast ( &ocspd_conf->condVars[CLIFD_COND] );
+		}
+
+		// Release the connfd MUTEX
+		PKI_MUTEX_release ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
+		pthread_cleanup_pop(0);
+
+		if(ocspd_conf->connfd == -1)
 		{
 			// Provides some information about the error
 			if (ocspd_conf->verbose || ocspd_conf->debug)
 			{
 				char err_str[512];
-				PKI_strerror ( errno, err_str, sizeof(err_str));
-				PKI_log_err("Network Error [%d::%s]", errno, err_str);
+				PKI_strerror ( err, err_str, sizeof(err_str));
+				PKI_log_err("Network Error [%d::%s]", err, err_str);
 			}
 
-			// Returns the connfd MUTEX and restart from the top of the cycle
-			PKI_MUTEX_release(&ocspd_conf->mutexes[CLIFD_MUTEX]);
+			// Restart from the top of the cycle
 			continue;
 		}
-		PKI_log_debug ( "Got new connection..");
 
-		// Communicate that there is a good socket waiting for a thread to pickup
-		PKI_COND_broadcast ( &ocspd_conf->condVars[CLIFD_COND] );
-		PKI_MUTEX_release ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
-		pthread_cleanup_pop(0);
+		PKI_log_debug ( "Con thread: got new connection..");
 
 		// Waits for a thread to successfully pickup the socket
-		PKI_log_debug ( "acquire next mutex..");
+		PKI_log_debug ( "Con thread: acquire next mutex..");
 		pthread_cleanup_push(cleanup_handler, &ocspd_conf->mutexes[SRVFD_MUTEX]);
 		PKI_MUTEX_acquire ( &ocspd_conf->mutexes[SRVFD_MUTEX] );
 		while (ocspd_conf->connfd > 2)
 		{
-			PKI_log_debug ( "cond wait..");
+			PKI_log_debug ( "Con thread: cond wait..");
 			PKI_COND_wait ( &ocspd_conf->condVars[SRVFD_COND],
 				&ocspd_conf->mutexes[SRVFD_MUTEX] );
 		}
 		PKI_MUTEX_release ( &ocspd_conf->mutexes[SRVFD_MUTEX] );
-		PKI_log_debug ( "connection handled by a thread");
+		PKI_log_debug ( "Con thread: connection handled by a thread");
 		pthread_cleanup_pop(0);
-
-		if(ocspd_conf->valgrind)
-		{
-			break; // valgrind
-		}
 	}
 
 

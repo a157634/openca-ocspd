@@ -21,5 +21,5 @@
   <pki:password>1234567890</pki:password>
   <!-- <pki:password>mil4yer</pki:password> -->
   <!-- Certificates -->
-  <pki:othercerts>file://$HOME/.libpki/certs.pem</pki:othercerts>
+  <pki:otherCerts>file://$HOME/.libpki/certs.pem</pki:otherCerts>
 </pki:tokenConfig>

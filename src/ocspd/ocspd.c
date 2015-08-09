@@ -131,7 +131,7 @@ bad:
 
 	if( valgrind ) 
 	{
-		PKI_log(PKI_LOG_ALWAYS, "WARNING: Valgrind Mode - Exit after first request");
+		PKI_log(PKI_LOG_ALWAYS, "WARNING: Valgrind Mode - Use pthread_exit() for smooth cleanup");
 		ocspd_conf->valgrind = 1;
 	}
 

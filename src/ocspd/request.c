@@ -48,7 +48,7 @@ PKI_X509_OCSP_REQ * ocspd_req_get_socket ( int connfd, OCSPD_CONFIG *ocspd_conf)
 	http_msg = PKI_HTTP_get_message(&sock, (int) ocspd_conf->max_timeout_secs, maxsize);
 	if (http_msg == NULL)
 	{
-		PKI_log_err ("Network Error while reading Request!");
+		PKI_log_debug ("Network Error while reading Request!");
 		return NULL;
 	}
 
@@ -74,6 +74,16 @@ PKI_X509_OCSP_REQ * ocspd_req_get_socket ( int connfd, OCSPD_CONFIG *ocspd_conf)
 		/* Skip leading '/' for the path */
 		while( *req_pnt == '/' )
 			req_pnt++;
+
+		if(strlen(req_pnt) == 0)
+		{
+			PKI_log_err ( "HTTP GET URL does not contain a valid path");
+			if(strlen(req_pnt) > MAX_LOG_TRACE_SIZE)
+				PKI_log_hexdump(PKI_LOG_ERR, "HTTP GET URL", MAX_LOG_TRACE_SIZE, http_msg->path);
+			else
+				PKI_log_hexdump(PKI_LOG_ERR, "HTTP GET URL", (int) strlen(http_msg->path), http_msg->path);
+			goto err;
+		}
 
 		pathmem = PKI_MEM_new_data(strlen(req_pnt), (unsigned char *) req_pnt);
 		if (pathmem == NULL)

@@ -20,5 +20,5 @@
   <pki:password>1234567890</pki:password>
   <!-- <pki:password></pki:password> -->
   <!-- Certificates -->
-  <pki:othercerts>file:://$USER/.pki/certs.pem</pki:othercerts>
+  <pki:otherCerts>file:://$USER/.pki/certs.pem</pki:otherCerts>
 </pki:tokenConfig>

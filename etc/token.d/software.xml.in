@@ -14,8 +14,8 @@
   <!-- CA Certificate -->
   <pki:cacert>file://@prefix@/etc/ocspd/certs/cacert.pem</pki:cacert>
   <!-- Certificates -->
-  <pki:othercerts>file:://@prefix@/etc/ocspd/certs/other-certs.pem</pki:othercerts>
-  <pki:trustedcerts>file:://@prefix@/etc/ocspd/certs/trusted-certs.pem</pki:trustedcerts>
+  <!--<pki:otherCerts>file:://@prefix@/etc/ocspd/certs/other-certs.pem</pki:otherCerts>-->
+  <!--<pki:trustedCerts>file:://@prefix@/etc/ocspd/certs/trusted-certs.pem</pki:trustedCerts>-->
   <!-- passin is used to specify the method for reading the token
        password. The following options are available:
          none ...... : do not prompt for any password

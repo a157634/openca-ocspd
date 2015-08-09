@@ -72,26 +72,28 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 				// This is for logging an SQL TIMESTAMP with fractional part (support by MySQL 5.6 and above)
 				// http://dev.mysql.com/doc/relnotes/mysql/5.6/en/news-5-6-4.html
 				// http://dev.mysql.com/doc/refman/5.6/en/datetime.html
-				if(gmtime_r(&sinfo->start.tv_sec, &tm) != NULL)
+				if(localtime_r(&sinfo->start.tv_sec, &tm) != NULL)
 				{
 					if(strftime(stime, sizeof(stime), "%Y-%m-%d %H:%M:%S", &tm) > 0)
-						err = BIO_printf(membio, "%s%s%s%ld", first ? "" : delimiter, prefix, stime, sinfo->start.tv_usec/1000);
+						err = BIO_printf(membio, "%s%s%s", first ? "" : delimiter, prefix, stime);
+						//err = BIO_printf(membio, "%s%s%s%ld", first ? "" : delimiter, prefix, stime, sinfo->start.tv_usec/1000);
 					else
 						PKI_log_err("strftime() returnd 0 - unable to calculate arrival time.");
 				}
 				else
-					PKI_log_err("gmtime_r() failed - unable to calculate arrival time.");
+					PKI_log_err("localtime_r() failed - unable to calculate arrival time.");
 				break;
 			case OCSPD_STATS_DEPARTURE_TIME:
-				if(gmtime_r(&sinfo->stop.tv_sec, &tm) != NULL)
+				if(localtime_r(&sinfo->stop.tv_sec, &tm) != NULL)
 				{
 					if(strftime(stime, sizeof(stime), "%Y-%m-%d %H:%M:%S", &tm) > 0)
-						err = BIO_printf(membio, "%s%s%s%ld", first ? "" : delimiter, prefix, stime, sinfo->stop.tv_usec/1000);
+						err = BIO_printf(membio, "%s%s%s", first ? "" : delimiter, prefix, stime);
+						//err = BIO_printf(membio, "%s%s%s%ld", first ? "" : delimiter, prefix, stime, sinfo->stop.tv_usec/1000);
 					else
 						PKI_log_err("strftime() returnd 0 - unable to calculate departure time.");
 				}
 				else
-					PKI_log_err("gmtime_r() failed - unable to calculate departure time.");
+					PKI_log_err("localtime_r() failed - unable to calculate departure time.");
 				break;
 			case OCSPD_STATS_INFO_RESPONSE_STATUS:
 				if(ocspd_conf->log_stats_url)
@@ -289,18 +291,18 @@ void * thread_main ( void *arg )
 		pthread_cleanup_push(cleanup_handler, &ocspd_conf->mutexes[CLIFD_MUTEX]);
 
 		/* Before calling the cond_wait we need to own the mutex */
-		PKI_log_debug ( "acquire mutex..");
+		PKI_log_debug ( "worker thread: acquire mutex..");
 		PKI_MUTEX_acquire ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
-		PKI_log_debug ( "got mutex..");
+		PKI_log_debug ( "worker thread: got mutex..");
 
 		while(ocspd_conf->connfd <= 2)
 		{
-			PKI_log_debug ( "cond wait..");
+			PKI_log_debug ( "worker thread: cond wait..");
 			PKI_COND_wait ( &ocspd_conf->condVars[CLIFD_COND],
 				&ocspd_conf->mutexes[CLIFD_MUTEX] );
 		}
 
-		PKI_log_debug ( "got new connection");
+		PKI_log_debug ( "worker thread: got new connection");
 
 		// Let's copy the socket descriptor
 		connfd = ocspd_conf->connfd;
@@ -337,8 +339,8 @@ void * thread_main ( void *arg )
 				PKI_log_err("Network Error [%d::%s] in getpeername", errno, err_str);
 			}
 
-				PKI_log(PKI_LOG_INFO, "Connection from [%s]",
-				inet_ntoa(sinfo.cliaddr.sin_addr));
+			PKI_log(PKI_LOG_INFO, "Connection from [%s]",
+			inet_ntoa(sinfo.cliaddr.sin_addr));
 		}
 
 		// Retrieves the request from the socket
@@ -410,12 +412,11 @@ void * thread_main ( void *arg )
 
 		// Finally close the current socket
 		PKI_NET_close(connfd);
+	}
 
 exit_thread:
-		if(ocspd_conf->valgrind) {
-			PKI_final_thread();
-			pthread_exit((void*)&ret); // valgrind
-		}
-	}
-  return(NULL);
+	PKI_final_thread();
+	pthread_exit((void*)&ret);
+
+	return(NULL);
 }
