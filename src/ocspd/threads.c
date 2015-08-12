@@ -150,14 +150,14 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 		first = 0;
 	}
 
-	if( (len = BIO_get_mem_data(membio, &p_data) ) <= 0)
-	{
-		PKI_log_err ( "BIO_get_mem_data() failed");
-		goto end;
-	}
-
 	if(ocspd_conf->log_stats_url)
 	{
+		if( (len = BIO_get_mem_data(membio, &p_data) ) <= 0)
+		{
+			PKI_log_err ( "BIO_get_mem_data() failed");
+			goto end;
+		}
+
 		if ((pki_mem = PKI_MEM_new_data((size_t)len, (unsigned char *)p_data)) == NULL)
 		{
 			PKI_ERROR(PKI_ERR_MEMORY_ALLOC, NULL);
@@ -174,6 +174,12 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 		if(BIO_write(membio, ";\x0", 2) <= 0)
 		{
 			PKI_log_err ("BIO_write() failed!\n");
+			goto end;
+		}
+
+		if( (len = BIO_get_mem_data(membio, &p_data) ) <= 0)
+		{
+			PKI_log_err ( "BIO_get_mem_data() failed");
 			goto end;
 		}
 
