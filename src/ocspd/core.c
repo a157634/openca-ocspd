@@ -269,7 +269,6 @@ static void * thread_con_handler ( void *arg )
 	char err_str[512];
 	sigset_t signal_set;
 	int ret = PKI_OK;
-	int err = 0;
 
 
 	th_id_con_hdl = PKI_THREAD_self();
@@ -300,25 +299,14 @@ static void * thread_con_handler ( void *arg )
 
 	for ( ; ; ) 
 	{
+		int err = 0;
+
 		// Acquires the Mutex for handling the ocspd_conf->connfd
 		pthread_cleanup_push(cleanup_handler, &ocspd_conf->mutexes[CLIFD_MUTEX]);
 		PKI_MUTEX_acquire ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
 		PKI_log_debug ( "Con thread: Wait for a new connection..");
 
-		ocspd_conf->connfd = PKI_NET_accept(ocspd_conf->listenfd, 0);
-		err = errno;
-
-		if(ocspd_conf->connfd != -1)
-		{
-			// Communicate that there is a good socket waiting for a thread to pickup
-			PKI_COND_broadcast ( &ocspd_conf->condVars[CLIFD_COND] );
-		}
-
-		// Release the connfd MUTEX
-		PKI_MUTEX_release ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
-		pthread_cleanup_pop(0);
-
-		if(ocspd_conf->connfd == -1)
+		if( (ocspd_conf->connfd = PKI_NET_accept(ocspd_conf->listenfd, 0) ) == -1)
 		{
 			// Provides some information about the error
 			if (ocspd_conf->verbose || ocspd_conf->debug)
@@ -328,6 +316,20 @@ static void * thread_con_handler ( void *arg )
 				PKI_log_err("Network Error [%d::%s]", err, err_str);
 			}
 
+			err = 1;
+		}
+		else
+		{
+			// Communicate that there is a good socket waiting for a thread to pickup
+			PKI_COND_broadcast ( &ocspd_conf->condVars[CLIFD_COND] );
+		}
+
+		// Release the connfd MUTEX
+		PKI_MUTEX_release ( &ocspd_conf->mutexes[CLIFD_MUTEX] );
+		pthread_cleanup_pop(0);
+
+		if(err)
+		{
 			// Restart from the top of the cycle
 			continue;
 		}
@@ -645,6 +647,9 @@ int set_privileges( OCSPD_CONFIG *conf ) {
 
 	struct passwd *pw = NULL;
 	struct group *gr = NULL;
+
+	if( !conf->group || !conf->user)
+		return 0;
 
 	if( (gr = getgrnam( conf->group ) ) == NULL ) {
 		PKI_log_err("Cannot find group %s", conf->group);
