@@ -661,15 +661,24 @@ int set_privileges( OCSPD_CONFIG *conf ) {
 		return 0;
 	}
 
+	/* When dropping privileges from root, the setgroups() call will
+	 * remove any extraneous groups.
+	 */
+
+	if(setgroups(0, NULL) == -1) {
+		PKI_log_err ("Dropping privileges failed [%s]", strerror(errno));
+		return 0;
+	}
+
 	if (setgid (gr->gr_gid) == -1) {
-		PKI_log_err ("Error setting group %d (%s)", 
-			gr->gr_gid, conf->group);
+		PKI_log_err ("Error setting group %d (%s): %s", 
+			gr->gr_gid, conf->group, strerror(errno));
 		return 0;
 	}
 
 	if (setuid (pw->pw_uid) == -1) {
-		PKI_log_err("Error setting user %d (%s)", 
-						pw->pw_uid, conf->user );
+		PKI_log_err("Error setting user %d (%s): %s", 
+						pw->pw_uid, conf->user, strerror(errno));
 		return 0;
 	}
 
