@@ -92,7 +92,7 @@
            e.g. >SHA1,SHA256<
            The algorithms must be given in capital letters. Every algorithm
            supported by OpenSSL can be used.
-           If not configured the digestAlgorithm (see below) ist used. -->
+           If not configured the digestAlgorithm (see below) is used. -->
       <pki:issuerHashDigestAlgorithm>SHA1,SHA256</pki:issuerHashDigestAlgorithm>
       <!-- Digest Algorithm to be used when building responses, currently
            the standard specifies SHA1 as the only supported algorithm -->
