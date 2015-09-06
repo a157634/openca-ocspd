@@ -336,18 +336,13 @@ void * thread_main ( void *arg )
 			PKI_log_err("Setting start timer with gettimeofday() failed [%d::%s]", errno, err_str);
 		}
 
-		// Some debugging information
-		if (ocspd_conf->debug)
+		if (getpeername(connfd, (struct sockaddr*)&sinfo.cliaddr, &cliaddrlen) == -1)
 		{
-			if (getpeername(connfd, (struct sockaddr*)&sinfo.cliaddr, &cliaddrlen) == -1)
-			{
-				PKI_strerror ( errno, err_str, sizeof(err_str));
-				PKI_log_err("Network Error [%d::%s] in getpeername", errno, err_str);
-			}
-
-			PKI_log(PKI_LOG_INFO, "Connection from [%s]",
-			inet_ntoa(sinfo.cliaddr.sin_addr));
+			PKI_strerror ( errno, err_str, sizeof(err_str));
+			PKI_log_err("Network Error [%d::%s] in getpeername", errno, err_str);
 		}
+
+		PKI_log(PKI_LOG_INFO, "Connection from [%s]", inet_ntoa(sinfo.cliaddr.sin_addr));
 
 		// Retrieves the request from the socket
 		req = ocspd_req_get_socket(connfd, ocspd_conf);
