@@ -112,7 +112,7 @@ bad:
 	}
 
 	PKI_log(PKI_LOG_ALWAYS, "OpenCA OCSPD v%s - starting (%s).", VERSION, SSLeay_version(SSLEAY_VERSION));
-	PKI_log(PKI_LOG_ALWAYS, "OpenCA OCSPD adapted by RVE. Version p1.0.7 (11 Aug 2015).");
+	PKI_log(PKI_LOG_ALWAYS, "OpenCA OCSPD adapted by RVE. Version p1.0.8 (21 Dec 2015).");
 
 	if(( ocspd_conf = OCSPD_load_config( configfile )) == NULL ) {
 		fprintf(stderr, "ERROR::can not load config file!\n\n");

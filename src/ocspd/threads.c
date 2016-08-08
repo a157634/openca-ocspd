@@ -25,7 +25,8 @@ static const char *certStatus[] = {
 };
 
 
-static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
+#define LOG_FALLBACK 1
+static int log_stats_data(OCSPD_SESSION_INFO *sinfo, int flags)
 {
 	int ret = 1;
 	BIO *membio = NULL;
@@ -46,16 +47,19 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 		return(PKI_ERR);
 	}
 
-	if(ocspd_conf->log_stats_url)
+	if(ocspd_conf->log_stats_url && !flags)
 		delimiter = "','";
 	else
 		delimiter = "; ";
+
+	if(flags)
+		BIO_printf(membio, "LFB: "); // To indicate a log fallback to file
 
 	for(tbl = ocsp_stats_item_tbl; tbl->name; tbl++)
 	{
 		int err = 0;
 
-		if(!ocspd_conf->log_stats_url)
+		if(!ocspd_conf->log_stats_url && !flags)
 			snprintf(prefix, sizeof(prefix), "%s:", tbl->name);
 
 		// For the first item a >'< will be prepended by URL_put_data_url()
@@ -96,13 +100,13 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 					PKI_log_err("localtime_r() failed - unable to calculate departure time.");
 				break;
 			case OCSPD_STATS_INFO_RESPONSE_STATUS:
-				if(ocspd_conf->log_stats_url)
+				if(ocspd_conf->log_stats_url && !flags)
 					err = BIO_printf(membio, "%s%s%d", first ? "" : delimiter, prefix, sinfo->resp_status);
         else
 					err = BIO_printf(membio, "%s%s%s", first ? "" : delimiter, prefix, responseStatus[sinfo->resp_status]);
 				break;
 			case OCSPD_STATS_INFO_CERT_STATUS:
-				if(ocspd_conf->log_stats_url)
+				if(ocspd_conf->log_stats_url && !flags)
 					err = BIO_printf(membio, "%s%s%d", first ? "" : delimiter, prefix, sinfo->cert_status);
         else
 					err = BIO_printf(membio, "%s%s%s", first ? "" : delimiter, prefix, certStatus[sinfo->cert_status]);
@@ -150,7 +154,7 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 		first = 0;
 	}
 
-	if(ocspd_conf->log_stats_url)
+	if(ocspd_conf->log_stats_url && !flags)
 	{
 		if( (len = BIO_get_mem_data(membio, &p_data) ) <= 0)
 		{
@@ -165,7 +169,11 @@ static int log_stats_data(OCSPD_SESSION_INFO *sinfo)
 		}
 
 		if(URL_put_data_url(ocspd_conf->log_stats_url, pki_mem, NULL, NULL, 0, 0, NULL) != PKI_OK)
-			PKI_log_err ( "URL_put_data_url() failed");
+		{
+			//PKI_log_err ( "URL_put_data_url() failed");
+			// If we fail, call function again and fallback to file logging
+			(void) log_stats_data(sinfo, LOG_FALLBACK);
+		}
 		else
 			ret = 0;
 	}
@@ -396,7 +404,7 @@ void * thread_main ( void *arg )
 			sinfo.duration = (unsigned int)((sinfo.stop.tv_sec - sinfo.start.tv_sec) * 1000 + (sinfo.stop.tv_usec - sinfo.start.tv_usec) / 1000);
 
 			if(ocspd_conf->log_stats_flags)
-				(void)log_stats_data(&sinfo);
+				(void)log_stats_data(&sinfo, 0);
 		}
 
 		if(sinfo.serial)
